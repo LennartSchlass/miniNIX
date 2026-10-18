@@ -115,6 +115,9 @@ def load_games(romdir):
 
 
 def battery():
+    fake = os.environ.get("NDS_MENU_FAKE_BATTERY")
+    if fake:
+        return int(fake.rstrip("+")), fake.endswith("+")
     for d in glob.glob("/sys/class/power_supply/[Bb][Aa][Tt]*"):
         try:
             cap = int(open(d + "/capacity").read())
@@ -122,8 +125,7 @@ def battery():
             return cap, status in ("charging", "full")
         except (OSError, ValueError):
             pass
-    fake = os.environ.get("NDS_MENU_FAKE_BATTERY")
-    return (int(fake.rstrip("+")), fake.endswith("+")) if fake else (None, False)
+    return None, False
 
 
 def run(cmd, capture=False):
@@ -326,7 +328,7 @@ class Menu:
             elif panel == "confirm":
                 self.ask("Gerät ausschalten?", lambda: None)
             elif panel:
-                self.open_page(panel)
+                self.open_page("settings" if panel == "menu" else panel)
             self.draw()
             self.screenshot(shot)
             return 0
