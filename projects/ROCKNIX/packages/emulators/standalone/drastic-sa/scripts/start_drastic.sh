@@ -83,6 +83,21 @@ fi
 cd /storage/.config/drastic/
 @HOTKEY@
 
+# Started at boot by EmulationStation (see the nds.bootlastgame quirk): disarm it,
+# and only boot into this game again once it has kept running.
+if [ -e "/run/rocknix/bootlastgame" ]; then
+  rm -f /run/rocknix/bootlastgame
+  del_setting global.bootgame.path
+  del_setting global.bootgame.cmd
+  del_setting nds.lastgame
+  for _ in $(seq 50); do
+    swaymsg -t get_version >/dev/null 2>&1 && break
+    sleep 0.2
+  done
+fi
+( sleep 15; set_setting nds.lastgame "${1}" ) &
+LASTGAME_TIMER=$!
+
 $GPTOKEYB "drastic" -c "drastic.gptk" &
 # Fix actual touch inputs by replacing touch->mouse translation and add hw mic support
 export LD_PRELOAD="/usr/lib/libdrastouch.so"
@@ -91,4 +106,10 @@ export DSHOOK_MIC_THRESH="${MICTHRESH}"
 export DSHOOK_SHADER="${SHADER:-none}"
 [ "${QUIRK_DEVICE}" = "Retroid Pocket Duo Lite" ] && export DSHOOK_WINDOW_SIZE="1280x1920"
 ./drastic "$1"
+kill ${LASTGAME_TIMER} 2>/dev/null
 kill -9 $(pidof gptokeyb)
+
+# The bottom screen is only used by DraStic, don't leave it lit behind ES.
+if [[ "${QUIRK_DEVICE}" == "Anbernic RG DS"* && "${SDL_VIDEO_DISPLAY_PRIORITY}" == *,* ]]; then
+  swaymsg output "${SDL_VIDEO_DISPLAY_PRIORITY#*,}" power off >/dev/null
+fi

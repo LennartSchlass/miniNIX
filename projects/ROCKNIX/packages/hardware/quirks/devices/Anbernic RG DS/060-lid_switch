@@ -1,0 +1,12 @@
+#!/bin/sh
+# SPDX-License-Identifier: Apache-2.0
+# Copyright (C) 2026-present ROCKNIX (https://github.com/ROCKNIX)
+
+# Closing the clamshell should sleep right away, not only once logind's default
+# 30 second hold-off after boot or resume has passed.
+mkdir -p /run/systemd/logind.conf.d
+cat <<CONF >/run/systemd/logind.conf.d/50-lid-holdoff.conf
+[Login]
+HoldoffTimeoutSec=5s
+CONF
+systemctl try-reload-or-restart systemd-logind

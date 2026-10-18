@@ -1,0 +1,21 @@
+#!/bin/bash
+# SPDX-License-Identifier: Apache-2.0
+# Copyright (C) 2026-present ROCKNIX (https://github.com/ROCKNIX)
+
+. /etc/profile
+
+# Boot into the last DraStic game through EmulationStation's startup game, which
+# runs it through runemu.sh before the frontend shows and skips a missing ROM.
+# start_drastic.sh records nds.lastgame and disarms this once the game starts.
+[ "$(get_setting bootlastgame nds)" = "1" ] || exit 0
+
+del_setting global.bootgame.path
+del_setting global.bootgame.cmd
+
+LASTGAME=$(sed -n 's|^nds\.lastgame=||p' "${J_CONF}" | tail -n 1)
+[ -n "${LASTGAME}" ] || exit 0
+
+set_setting global.bootgame.path "${LASTGAME}"
+set_setting global.bootgame.cmd "/usr/bin/runemu.sh '${LASTGAME//\'/\'\\\'\'}' -Pnds --core=drastic-sa --emulator=drastic --controllers=\"%CONTROLLERSCONFIG%\""
+mkdir -p /run/rocknix
+touch /run/rocknix/bootlastgame
