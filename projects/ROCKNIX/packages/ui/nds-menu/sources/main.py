@@ -8,6 +8,7 @@
 
 import ctypes
 import glob
+import json
 import math
 import os
 import subprocess
@@ -99,13 +100,32 @@ def battery():
     return (int(fake), False) if fake else (None, False)
 
 
-def sway(*args):
+def sway(*args, capture=False):
     if NO_SWAY:
-        return
+        return ""
     try:
-        subprocess.run(["swaymsg", *args], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=5)
+        r = subprocess.run(["swaymsg", *args], stdout=subprocess.PIPE if capture else subprocess.DEVNULL,
+                           stderr=subprocess.DEVNULL, timeout=5)
+        return r.stdout.decode(errors="replace") if capture else ""
     except (OSError, subprocess.TimeoutExpired):
-        pass
+        return ""
+
+
+def window_rect(app_id):
+    tree = sway("-t", "get_tree", capture=True)
+    if not tree:
+        return None
+    try:
+        nodes = [json.loads(tree)]
+    except ValueError:
+        return None
+    while nodes:
+        n = nodes.pop()
+        if n.get("app_id") == app_id:
+            r = n.get("rect", {})
+            return r.get("x"), r.get("y"), r.get("width"), r.get("height")
+        nodes.extend(n.get("nodes", []) + n.get("floating_nodes", []))
+    return None
 
 
 def second_output():
@@ -145,6 +165,8 @@ class Menu:
 
     # ---------- setup ----------
     def run(self):
+        # SDL takes the Wayland app id from the environment; children (DraStic,
+        # EmulationStation) get it scrubbed again so sway's rules still recognise them
         os.environ.setdefault("SDL_VIDEODRIVER", "wayland")
         os.environ["SDL_VIDEO_WAYLAND_WMCLASS"] = APP_ID
         os.environ["SDL_APP_ID"] = APP_ID
@@ -186,6 +208,8 @@ class Menu:
             self.draw()
             self.screenshot(shot)
             return 0
+        self.draw()
+        self.place_window()
         if os.environ.get("NDS_MENU_BENCH"):
             self.bench()
         self.loop()
@@ -196,7 +220,21 @@ class Menu:
         if second:
             sway("output", second, "power", "on")
         sway("input", TOUCH_ID, "map_to_region", "0", "0", str(WIN_W), str(WIN_H))
-        sway(f'[app_id="{APP_ID}"]', "move", "absolute", "position", "0", "0")
+        self.place_window()
+
+    def place_window(self):
+        """Sway centres the floating window on the seam between the panels; two separate
+        moves put it at the origin (the first one changes its workspace)."""
+        if NO_SWAY:
+            return
+        for _ in range(30):
+            r = window_rect(APP_ID)
+            if r:
+                if r[:2] != (0, 0):
+                    sway(f'[app_id="{APP_ID}"]', "move", "absolute", "position", "0", "0")
+                    sway(f'[app_id="{APP_ID}"]', "move", "absolute", "position", "0", "0")
+                return
+            time.sleep(0.1)
 
     def font(self, size, bold=False):
         key = (size, bold)
@@ -364,8 +402,10 @@ class Menu:
         self.draw_top()
         self.draw_bottom()
         if self.busy:
-            self.rect(0, 0, WIN_W, WIN_H, (255, 255, 255, 160))
-            self.text(self.busy, WIN_W // 2, WIN_H // 2 - 16, 32, C_TEXT, True, "center")
+            # Only the bottom screen stays visible behind a child; the top is covered by it
+            self.rect(SCREEN_W, 0, SCREEN_W, SCREEN_H, (255, 255, 255, 170))
+            self.text(self.busy, SCREEN_W + SCREEN_W // 2, SCREEN_H // 2 - 28, 32, C_TEXT, True, "center", SCREEN_W - 40)
+            self.text("Zurück im DS-Menü, sobald das Programm beendet wird", SCREEN_W + SCREEN_W // 2, SCREEN_H // 2 + 20, 16, C_TEXT_DIM, False, "center")
         sdl.RenderPresent(self.renderer)
         self.dirty = False
 
@@ -677,11 +717,13 @@ class Menu:
                 return
 
     # ---------- actions ----------
-    def run_child(self, label, cmd, env=None):
+    def run_child(self, label, cmd, extra_env=None):
         self.held = 0
         self.drag = None
         self.busy = label
         self.draw()
+        env = {k: v for k, v in os.environ.items() if k not in ("SDL_VIDEO_WAYLAND_WMCLASS", "SDL_APP_ID")}
+        env.update(extra_env or {})
         try:
             subprocess.run(cmd, env=env)
         except OSError as e:
@@ -697,12 +739,11 @@ class Menu:
         if not self.games or self.animating:
             return
         g = self.games[self.sel]
-        env = dict(os.environ, NDS_MENU="1")
-        self.run_child(f"{g.name} wird gestartet …",
-                       ["/usr/bin/runemu.sh", g.path, "-Pnds", "--core=drastic-sa", "--emulator=drastic"], env)
+        self.run_child(f"{g.name.split(' - ')[0]} läuft …",
+                       ["/usr/bin/runemu.sh", g.path, "-Pnds", "--core=drastic-sa", "--emulator=drastic"], {"NDS_MENU": "1"})
 
     def settings(self):
-        self.run_child("Einstellungen …",
+        self.run_child("Einstellungen sind oben geöffnet",
                        ["bash", "-c", ". /usr/bin/es_settings; exec emulationstation --log-path /var/log --no-splash"])
 
     def sleep(self):
