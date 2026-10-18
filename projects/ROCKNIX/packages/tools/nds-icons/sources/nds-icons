@@ -1,0 +1,218 @@
+#!/usr/bin/env python3
+# SPDX-License-Identifier: GPL-2.0
+# Copyright (C) 2026-present ROCKNIX (https://github.com/ROCKNIX)
+
+# Extract the banner icon and title of each Nintendo DS ROM and add them
+# to the EmulationStation gamelist. Existing gamelist data is never replaced.
+
+import os
+import shutil
+import struct
+import subprocess
+import sys
+import xml.etree.ElementTree as ET
+import zipfile
+import zlib
+
+ROM_EXTS = (".nds", ".zip", ".7z")
+SKIP_DIRS = {"images", "videos", "manuals", "media", "downloaded_images", "downloaded_videos"}
+BANNER_SIZE = 0x840
+SCALE = 4
+
+
+def read_banner(f):
+    header = f.read(0x200)
+    if len(header) < 0x6C:
+        return None
+    offset = struct.unpack_from("<I", header, 0x68)[0]
+    if offset < 0x200:
+        return None
+    f.seek(offset)
+    banner = f.read(BANNER_SIZE)
+    if len(banner) < BANNER_SIZE or struct.unpack_from("<H", banner)[0] not in (1, 2, 3, 0x103):
+        return None
+    return banner
+
+
+class PipeReader:
+    def __init__(self, stream):
+        self.stream, self.pos = stream, 0
+
+    def read(self, n):
+        data = self.stream.read(n)
+        self.pos += len(data)
+        return data
+
+    def seek(self, offset):
+        while self.pos < offset and self.read(min(offset - self.pos, 1 << 20)):
+            pass
+
+
+def banner_from_7z(path):
+    tool = shutil.which("7z") or shutil.which("7za")
+    if not tool:
+        return None
+    listing = subprocess.run([tool, "l", "-slt", path], capture_output=True, text=True, errors="replace").stdout
+    members = [line[7:] for line in listing.split("----------", 1)[-1].splitlines() if line.startswith("Path = ")]
+    member = next((m for m in members if m.lower().endswith(".nds")), None)
+    if not member:
+        return None
+    proc = subprocess.Popen([tool, "e", "-so", path, member], stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
+    try:
+        return read_banner(PipeReader(proc.stdout))
+    finally:
+        proc.kill()
+        proc.wait()
+
+
+def load_banner(path):
+    ext = os.path.splitext(path)[1].lower()
+    try:
+        if ext == ".nds":
+            with open(path, "rb") as f:
+                return read_banner(f)
+        if ext == ".zip":
+            with zipfile.ZipFile(path) as z:
+                member = next((n for n in z.namelist() if n.lower().endswith(".nds")), None)
+                if member:
+                    with z.open(member) as f:
+                        return read_banner(f)
+        if ext == ".7z":
+            return banner_from_7z(path)
+    except Exception as e:
+        print(f"nds-icons: {path}: {e}", file=sys.stderr)
+    return None
+
+
+def banner_title(banner):
+    for start in (0x340, 0x240):
+        text = banner[start:start + 0x100].decode("utf-16-le", "replace").split("\0", 1)[0]
+        lines = [l.strip() for l in text.splitlines() if l.strip()]
+        if lines:
+            # the last of two or more lines is the publisher
+            return " - ".join(lines[:2]) if len(lines) >= 3 else lines[0]
+    return None
+
+
+def png_chunk(kind, data):
+    return struct.pack(">I", len(data)) + kind + data + struct.pack(">I", zlib.crc32(kind + data))
+
+
+def icon_png(banner):
+    palette = []
+    for i, c in enumerate(struct.unpack_from("<16H", banner, 0x220)):
+        r, g, b = c & 0x1F, (c >> 5) & 0x1F, (c >> 10) & 0x1F
+        palette.append(bytes(((r << 3) | (r >> 2), (g << 3) | (g >> 2), (b << 3) | (b >> 2), 0 if i == 0 else 255)))
+    rows = bytearray()
+    for y in range(32):
+        row = bytearray()
+        for x in range(32):
+            byte = banner[0x20 + ((y >> 3) * 4 + (x >> 3)) * 32 + (y & 7) * 4 + ((x & 7) >> 1)]
+            row += palette[(byte >> 4) if x & 1 else (byte & 0xF)] * SCALE
+        rows += (b"\0" + row) * SCALE
+    size = 32 * SCALE
+    return (b"\x89PNG\r\n\x1a\n"
+            + png_chunk(b"IHDR", struct.pack(">IIBBBBB", size, size, 8, 6, 0, 0, 0))
+            + png_chunk(b"IDAT", zlib.compress(bytes(rows), 9))
+            + png_chunk(b"IEND", b""))
+
+
+def write_atomic(path, data):
+    tmp = path + ".tmp"
+    with open(tmp, "wb") as f:
+        f.write(data)
+    os.replace(tmp, path)
+
+
+def set_child(node, tag, text):
+    child = node.find(tag)
+    if child is None:
+        child = ET.SubElement(node, tag)
+    child.text = text
+
+
+def gamelist_path(romdir):
+    local = os.path.join(romdir, "gamelist.xml")
+    user = os.path.expanduser(f"~/.emulationstation/gamelists/{os.path.basename(romdir)}/gamelist.xml")
+    return user if not os.path.exists(local) and os.path.exists(user) else local
+
+
+def roms(romdir):
+    for root, dirs, files in os.walk(romdir):
+        dirs[:] = sorted(d for d in dirs if not d.startswith(".") and d.lower() not in SKIP_DIRS)
+        for name in sorted(files):
+            if name.lower().endswith(ROM_EXTS) and not name.startswith("."):
+                yield os.path.relpath(os.path.join(root, name), romdir)
+
+
+def main():
+    romdir = os.path.abspath(sys.argv[1] if len(sys.argv) > 1 else "/storage/roms/nds")
+    if not os.path.isdir(romdir):
+        return 0
+
+    xmlpath = gamelist_path(romdir)
+    if os.path.exists(xmlpath):
+        try:
+            tree = ET.parse(xmlpath, ET.XMLParser(target=ET.TreeBuilder(insert_comments=True)))
+        except ET.ParseError as e:
+            print(f"nds-icons: {xmlpath}: {e}, leaving it untouched", file=sys.stderr)
+            return 1
+        root = tree.getroot()
+        if root.tag != "gameList":
+            return 1
+    else:
+        root = ET.Element("gameList")
+        tree = ET.ElementTree(root)
+
+    games = {}
+    for game in root.iter("game"):
+        p = game.findtext("path")
+        if p:
+            games[os.path.normpath(os.path.join(romdir, p.strip()))] = game
+
+    changed = False
+    for rel in roms(romdir):
+        full = os.path.join(romdir, rel)
+        stem = os.path.splitext(rel)[0]
+        game = games.get(full)
+        name = game.findtext("name", "").strip() if game is not None else ""
+        need_image = game is None or not game.findtext("image", "").strip()
+        # a name equal to the file name is the ES default, not user data
+        need_name = not name or (need_image and name == os.path.basename(stem))
+        if not need_name and not need_image:
+            continue
+
+        icon_rel = os.path.join("images", stem + "-image.png")
+        icon = os.path.join(romdir, icon_rel)
+        need_icon = need_image and not os.path.exists(icon)
+        title = None
+        if need_name or need_icon:
+            banner = load_banner(full)
+            if banner is None:
+                continue
+            title = banner_title(banner)
+            if need_icon:
+                os.makedirs(os.path.dirname(icon), exist_ok=True)
+                write_atomic(icon, icon_png(banner))
+
+        if not need_image and not title:
+            continue
+        if game is None:
+            game = ET.SubElement(root, "game")
+            ET.SubElement(game, "path").text = "./" + rel
+        if need_name and title:
+            set_child(game, "name", title)
+        if need_image:
+            set_child(game, "image", "./" + icon_rel)
+        changed = True
+
+    if changed:
+        ET.indent(tree, space="\t")
+        tmp = xmlpath + ".tmp"
+        tree.write(tmp, encoding="utf-8", xml_declaration=True)
+        os.replace(tmp, xmlpath)
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

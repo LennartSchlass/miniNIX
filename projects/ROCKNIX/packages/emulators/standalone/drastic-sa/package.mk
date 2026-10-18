@@ -6,7 +6,7 @@ PKG_VERSION="1.0"
 PKG_SHA256="b7bbeb7493bcc355619880c0929cf2709e264f0785ab709a9c305e73b1199b30"
 PKG_LICENSE="proprietary"
 PKG_URL="https://github.com/ROCKNIX/packages/raw/main/drastic.tar.gz"
-PKG_DEPENDS_TARGET="toolchain rocknix-hotkey"
+PKG_DEPENDS_TARGET="toolchain rocknix-hotkey nds-icons"
 PKG_LONGDESC="Install Drastic Launcher script, will download bin on first run"
 PKG_TOOLCHAIN="make"
 
