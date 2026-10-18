@@ -51,6 +51,7 @@ static GLint (*p_glGetUniformLocation)(GLuint, const GLchar *) = NULL;
 static void (*p_glUniform1i)(GLint, GLint) = NULL;
 static void (*p_glUniform2f)(GLint, GLfloat, GLfloat) = NULL;
 static void (*p_glTexParameteri)(GLenum, GLenum, GLint) = NULL;
+static void (*p_glGetTexParameteriv)(GLenum, GLenum, GLint *) = NULL;
 static void (*p_glGetIntegerv)(GLenum, GLint *) = NULL;
 static void (*p_glViewport)(GLint, GLint, GLsizei, GLsizei) = NULL;
 static void (*p_glUseProgram)(GLuint) = NULL;
@@ -70,6 +71,7 @@ static void (*p_glDisable)(GLenum) = NULL;
 #define SHADER_SCANLINES 4
 #define SHADER_LCD3X 5
 #define SHADER_LCD1X_NDS_COLOR 6
+#define SHADER_AREA_SHARP 7
 
 static int shader_mode = SHADER_NONE;
 static int gl_renderer_desktop = 0; // 1 when SDL uses "opengl" renderer (not "opengles2")
@@ -77,6 +79,7 @@ static GLuint shader_program = 0;
 static GLint loc_texture = -1;
 static GLint loc_texture_size = -1;
 static GLint loc_output_size = -1; // sharp-bilinear only
+static GLint shader_tex_filter = 0; // texture filter forced during the shader pass, 0 = keep SDL's
 static int shader_frame_calls = 0;
 
 // --- DS / window state (declared before all functions that use them) ---
@@ -149,6 +152,7 @@ static void init_gl_funcs(void) {
     GLSYM(glUniform1i);
     GLSYM(glUniform2f);
     GLSYM(glTexParameteri);
+    GLSYM(glGetTexParameteriv);
     GLSYM(glGetIntegerv);
     GLSYM(glViewport);
     GLSYM(glUseProgram);
@@ -179,6 +183,7 @@ static void init_gl_funcs(void) {
         GLSYM(glUniform1i);
         GLSYM(glUniform2f);
         GLSYM(glTexParameteri);
+        GLSYM(glGetTexParameteriv);
         GLSYM(glGetIntegerv);
         GLSYM(glViewport);
         GLSYM(glUseProgram);
@@ -284,9 +289,16 @@ static const char *FRAG_LCD3X =
 
 // Sharp-shimmerless: nearest-neighbor within source texels; boundary-crossing output
 // pixels sample a fixed sub-texel position so blend ratios don't drift with sub-pixel
-// scroll, eliminating shimmer.
+// scroll, eliminating shimmer. Equivalent to an area (box) filter. highp because mediump
+// (fp16 on Mali) lands samples off-centre in a 640-px output and bleeds neighbouring texels.
 static const char *FRAG_SHARP_SHIMMERLESS =
+    "#ifdef GL_ES\n"
+    "#ifdef GL_FRAGMENT_PRECISION_HIGH\n"
+    "precision highp float;\n"
+    "#else\n"
     "precision mediump float;\n"
+    "#endif\n"
+    "#endif\n"
     "varying vec2 v_texcoord;\n"
     "uniform sampler2D u_texture;\n"
     "uniform vec2 u_texture_size;\n"
@@ -351,6 +363,60 @@ static const char *FRAG_QUILEZ =
     "    p = i + f;\n"
     "    p = (p - vec2(0.5)) / u_texture_size;\n"
     "    gl_FragColor = SWIZ(texture2D(u_texture, p));\n"
+    "}\n";
+
+// Area-sharp: area filter like sharp-shimmerless, but at scales >= 2 a blended pixel takes
+// the colour of a 1-texel-wide feature instead (EPX-style rule: l==a, b!=r -> b), so thin
+// lines and font strokes become a uniform 3 px instead of 2 px + a half-tone. Flat areas,
+// dithering and 3D rarely match exactly and keep the 50/50 blend. Colours must match
+// exactly; the tolerance only absorbs float error (blends sit on 0.5/255 steps).
+// Horizontal rule first, then vertical on the horizontally scaled rows. Needs GL_NEAREST.
+static const char *FRAG_AREA_SHARP =
+    "#ifdef GL_ES\n"
+    "#ifdef GL_FRAGMENT_PRECISION_HIGH\n"
+    "precision highp float;\n"
+    "#else\n"
+    "precision mediump float;\n"
+    "#endif\n"
+    "#endif\n"
+    "varying vec2 v_texcoord;\n"
+    "uniform sampler2D u_texture;\n"
+    "uniform vec2 u_texture_size;\n"
+    "uniform vec2 u_output_size;\n"
+    "vec4 T(float x, float y) {\n"
+    "    return SWIZ(texture2D(u_texture, vec2(x, y) / u_texture_size));\n"
+    "}\n"
+    "bool eq(vec4 a, vec4 b) {\n"
+    "    vec3 d = abs(a.rgb - b.rgb);\n"
+    "    return max(d.r, max(d.g, d.b)) < 0.0015;\n"
+    "}\n"
+    "float pick(vec4 l, vec4 a, vec4 b, vec4 r, float w) {\n"
+    "    bool la = eq(l, a), br = eq(b, r);\n"
+    "    if (la && !br) return 1.0;\n"
+    "    if (br && !la) return 0.0;\n"
+    "    return w;\n"
+    "}\n"
+    "vec4 H(float y, float i, float w, bool rule) {\n"
+    "    if (w <= 0.0) return T(i - 0.5, y);\n"
+    "    if (w >= 1.0) return T(i + 0.5, y);\n"
+    "    vec4 a = T(i - 0.5, y), b = T(i + 0.5, y);\n"
+    "    if (rule && !eq(a, b)) w = pick(T(i - 1.5, y), a, b, T(i + 1.5, y), w);\n"
+    "    return mix(a, b, w);\n"
+    "}\n"
+    "void main() {\n"
+    "    vec2 scale = u_output_size / u_texture_size;\n"
+    "    vec2 p = v_texcoord * u_texture_size;\n"
+    "    vec2 i = floor(p + 0.5);\n"
+    "    vec2 w = clamp((p - i) * scale + 0.5, 0.0, 1.0);\n"
+    "    w = mix(w, floor(w + 0.5), step(0.49, abs(w - 0.5)));\n"
+    "    bvec2 rule = greaterThanEqual(scale, vec2(2.0));\n"
+    "    if (w.y <= 0.0) { gl_FragColor = H(i.y - 0.5, i.x, w.x, rule.x); return; }\n"
+    "    if (w.y >= 1.0) { gl_FragColor = H(i.y + 0.5, i.x, w.x, rule.x); return; }\n"
+    "    vec4 a = H(i.y - 0.5, i.x, w.x, rule.x), b = H(i.y + 0.5, i.x, w.x, rule.x);\n"
+    "    float wy = w.y;\n"
+    "    if (rule.y && !eq(a, b))\n"
+    "        wy = pick(H(i.y - 1.5, i.x, w.x, rule.x), a, b, H(i.y + 1.5, i.x, w.x, rule.x), wy);\n"
+    "    gl_FragColor = mix(a, b, wy);\n"
     "}\n";
 
 // ---------------------------------------------------------------------------
@@ -423,6 +489,7 @@ static void init_shader_program(void) {
         case SHADER_SCANLINES:         frag = FRAG_SCANLINES;         break;
         case SHADER_LCD3X:             frag = FRAG_LCD3X;             break;
         case SHADER_LCD1X_NDS_COLOR:   frag = FRAG_LCD1X_NDS_COLOR;   break;
+        case SHADER_AREA_SHARP:        frag = FRAG_AREA_SHARP;        shader_tex_filter = GL_NEAREST; break;
         default:                       frag = FRAG_SHARP_BILINEAR;    break;
     }
     shader_program = make_gl_program(VERT_SRC, frag);
@@ -483,6 +550,14 @@ static int run_shader_copy(SDL_Renderer *r, SDL_Texture *texture,
     p_glDisable(GL_BLEND);
     p_glDisable(GL_SCISSOR_TEST);
 
+    GLint saved_min_filter = 0, saved_mag_filter = 0;
+    if (shader_tex_filter) {
+        p_glGetTexParameteriv(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, &saved_min_filter);
+        p_glGetTexParameteriv(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, &saved_mag_filter);
+        p_glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, shader_tex_filter);
+        p_glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, shader_tex_filter);
+    }
+
     p_glViewport(gl_x, gl_y, gl_w, gl_h);
     p_glUseProgram(shader_program);
     if (loc_texture >= 0) p_glUniform1i(loc_texture, 0);
@@ -526,6 +601,10 @@ static int run_shader_copy(SDL_Renderer *r, SDL_Texture *texture,
         p_glDisableVertexAttribArray(1);
     }
 
+    if (shader_tex_filter) {
+        p_glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, saved_min_filter);
+        p_glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, saved_mag_filter);
+    }
     SDL_GL_UnbindTexture(texture);
 
     p_glUseProgram(saved_program);
@@ -896,6 +975,8 @@ static void init(void) {
             shader_mode = SHADER_SHARP_SHIMMERLESS;
         else if (strcmp(shader_str, "lcd1x-nds-color") == 0)
             shader_mode = SHADER_LCD1X_NDS_COLOR;
+        else if (strcmp(shader_str, "area-sharp") == 0)
+            shader_mode = SHADER_AREA_SHARP;
     }
 
     const char* threshold_str = getenv("DSHOOK_MIC_THRESH");
