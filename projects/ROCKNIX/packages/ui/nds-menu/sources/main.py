@@ -133,13 +133,15 @@ class Menu:
         self.controllers = {}
         self.joysticks = {}
         self.textures = {}        # text cache
-        self.shapes = {}          # rounded rect textures
+        self.shapes = {}          # corner textures per radius
+        self.stripe_rects = {}
         self.fonts = {}
         self.dirty = True
         self.quit = False
         self.gamelist_mtime = 0
         self.last_check = 0.0
         self.busy = None          # overlay text while a child runs
+        self.touch_log = 0
 
     # ---------- setup ----------
     def run(self):
@@ -160,9 +162,11 @@ class Menu:
         sdl.IMG_Init(sdl.IMG_INIT_PNG)
         sdl.TTF_Init()
 
-        # Span both panels like DraStic; the rule is harmless if the config has it already
+        # Span both panels like DraStic. Sway centres the floating window on the seam first,
+        # which changes its workspace, so the move is issued twice (same as the Duo Lite rule).
         sway("for_window", f'[app_id="{APP_ID}"]', "floating", "enable,", "border", "none,",
-             "resize", "set", str(WIN_W), str(WIN_H) + ",", "move", "absolute", "position", "0", "0")
+             "resize", "set", str(WIN_W), str(WIN_H) + ",", "move", "absolute", "position", "0", "0,",
+             "move", "absolute", "position", "0", "0")
         self.window = sdl.CreateWindow(APP_ID.encode(), 0, 0, WIN_W, WIN_H, sdl.WINDOW_SHOWN | sdl.WINDOW_BORDERLESS)
         if not self.window:
             print("SDL_CreateWindow:", sdl.error(), file=sys.stderr)
@@ -182,6 +186,8 @@ class Menu:
             self.draw()
             self.screenshot(shot)
             return 0
+        if os.environ.get("NDS_MENU_BENCH"):
+            self.bench()
         self.loop()
         return 0
 
@@ -190,6 +196,7 @@ class Menu:
         if second:
             sway("output", second, "power", "on")
         sway("input", TOUCH_ID, "map_to_region", "0", "0", str(WIN_W), str(WIN_H))
+        sway(f'[app_id="{APP_ID}"]', "move", "absolute", "position", "0", "0")
 
     def font(self, size, bold=False):
         key = (size, bold)
@@ -212,6 +219,8 @@ class Menu:
             c = sdl.GameControllerOpen(index)
             if c:
                 self.controllers[index] = c
+                name = sdl.GameControllerName(c)
+                print("controller:", name.decode(errors="replace") if name else "?", file=sys.stderr)
                 return
         j = sdl.JoystickOpen(index)
         if j:
@@ -249,29 +258,29 @@ class Menu:
         return game.tex or None
 
     # ---------- drawing primitives ----------
-    def rounded(self, w, h, r):
-        """White rounded rectangle with anti-aliased corners as a texture, tinted when drawn."""
-        key = (w, h, r)
-        tex = self.shapes.get(key)
+    def corner_tex(self, r):
+        """Tiny white rounded square with anti-aliased corners; rounded rectangles of any
+        size are drawn from its nine slices, so sizes can animate without new textures."""
+        tex = self.shapes.get(r)
         if tex is None:
-            buf = bytearray(w * h * 4)
-            for y in range(h):
-                for x in range(w):
-                    cx = r - x - 1 if x < r else x - (w - r) if x >= w - r else -1
-                    cy = r - y - 1 if y < r else y - (h - r) if y >= h - r else -1
+            size = 2 * r + 2
+            buf = bytearray(size * size * 4)
+            for y in range(size):
+                for x in range(size):
+                    cx = r - x - 1 if x < r else x - (size - r) if x >= size - r else -1
+                    cy = r - y - 1 if y < r else y - (size - r) if y >= size - r else -1
                     if cx < 0 or cy < 0:
                         a = 255
                     else:
-                        d = math.hypot(cx + 0.5, cy + 0.5)
-                        a = int(255 * min(1.0, max(0.0, r + 0.5 - d)))
-                    i = (y * w + x) * 4
+                        a = int(255 * min(1.0, max(0.0, r + 0.5 - math.hypot(cx + 0.5, cy + 0.5))))
+                    i = (y * size + x) * 4
                     buf[i:i + 4] = b"\xff\xff\xff" + bytes((a,))
             raw = (ctypes.c_uint8 * len(buf)).from_buffer(buf)
-            surf = sdl.CreateRGBSurfaceWithFormatFrom(raw, w, h, 32, w * 4, sdl.PIXELFORMAT_ABGR8888)
+            surf = sdl.CreateRGBSurfaceWithFormatFrom(raw, size, size, 32, size * 4, sdl.PIXELFORMAT_ABGR8888)
             tex = sdl.CreateTextureFromSurface(self.renderer, surf)
             sdl.FreeSurface(surf)
             sdl.SetTextureBlendMode(tex, sdl.BLENDMODE_BLEND)
-            self.shapes[key] = tex
+            self.shapes[r] = tex
         return tex
 
     def rect(self, x, y, w, h, color, r=0):
@@ -279,15 +288,22 @@ class Menu:
         if w <= 0 or h <= 0:
             return
         a = color[3] if len(color) > 3 else 255
+        sdl.SetRenderDrawColor(self.renderer, color[0], color[1], color[2], a)
+        r = min(r, w // 2, h // 2)
         if r <= 0:
-            sdl.SetRenderDrawColor(self.renderer, color[0], color[1], color[2], a)
             sdl.RenderFillRect(self.renderer, sdl.Rect(x, y, w, h))
             return
-        r = min(r, w // 2, h // 2)
-        tex = self.rounded(min(w, 256), min(h, 256), min(r, 64)) if (w > 256 or h > 256) else self.rounded(w, h, r)
+        tex = self.corner_tex(r)
         sdl.SetTextureColorMod(tex, color[0], color[1], color[2])
         sdl.SetTextureAlphaMod(tex, a)
-        sdl.RenderCopy(self.renderer, tex, None, sdl.Rect(x, y, w, h))
+        cols = ((0, r, x, r), (r, 2, x + r, w - 2 * r), (r + 2, r, x + w - r, r))
+        rows = ((0, r, y, r), (r, 2, y + r, h - 2 * r), (r + 2, r, y + h - r, r))
+        for sy, sh, dy, dh in rows:
+            if dh <= 0:
+                continue
+            for sx, sw, dx, dw in cols:
+                if dw > 0:
+                    sdl.RenderCopy(self.renderer, tex, sdl.Rect(sx, sy, sw, sh), sdl.Rect(dx, dy, dw, dh))
 
     def box(self, x, y, w, h, fill, border, bw=2, r=12, alpha=255):
         self.rect(x, y, w, h, (*border[:3], alpha), r)
@@ -353,9 +369,18 @@ class Menu:
         sdl.RenderPresent(self.renderer)
         self.dirty = False
 
+    def stripes(self, x0, y0):
+        key = (x0, y0)
+        arr = self.stripe_rects.get(key)
+        if arr is None:
+            ys = list(range(y0, SCREEN_H, 24))
+            arr = (sdl.Rect * len(ys))(*[sdl.Rect(x0, y, SCREEN_W, 1) for y in ys])
+            self.stripe_rects[key] = arr
+        sdl.SetRenderDrawColor(self.renderer, *C_STRIPE)
+        sdl.RenderFillRects(self.renderer, arr, len(arr))
+
     def draw_top(self):
-        for y in range(44, SCREEN_H, 24):
-            self.rect(0, y, SCREEN_W, 1, C_STRIPE)
+        self.stripes(0, 44)
         self.rect(0, 0, SCREEN_W, 44, C_TOP_BAR)
         self.rect(0, 44, SCREEN_W, 2, C_BORDER)
         now = datetime.now()
@@ -430,8 +455,7 @@ class Menu:
     def draw_bottom(self):
         ox = SCREEN_W
         self.rect(ox, 0, SCREEN_W, SCREEN_H, C_BOTTOM_BG)
-        for y in range(8, SCREEN_H, 24):
-            self.rect(ox, y, SCREEN_W, 1, C_STRIPE)
+        self.stripes(ox, 8)
         n = len(self.games)
         if n:
             self.text(f"{self.sel + 1} / {n}", ox + SCREEN_W - 16, 12, 16, C_TEXT_DIM, align="right")
@@ -597,6 +621,9 @@ class Menu:
 
     def finger(self, t, x, y):
         now = time.monotonic()
+        if self.touch_log < 12:
+            self.touch_log += 1
+            print(f"touch {t:#x} {x:.0f},{y:.0f}", file=sys.stderr)
         if t == sdl.EVENT_FINGERDOWN:
             self.drag = [x, self.pos, False, [(now, x)]]
             self.animating = False
@@ -716,6 +743,18 @@ class Menu:
                 self.draw()
             elif not active:
                 sdl.Delay(10)
+
+    def bench(self):
+        frames, t0 = 0, time.monotonic()
+        while time.monotonic() - t0 < 3.0 and len(self.games) > 1:
+            if not self.animating:
+                self.select((self.sel + 1) % len(self.games))
+            t = min(1.0, (time.monotonic() - self.anim_t0) / 0.22)
+            self.pos = self.anim_from + (self.sel - self.anim_from) * ease(t)
+            self.animating = t < 1.0
+            self.draw()
+            frames += 1
+        print(f"bench: {frames / (time.monotonic() - t0):.1f} fps", file=sys.stderr)
 
     def screenshot(self, path):
         buf = (ctypes.c_uint8 * (WIN_W * WIN_H * 3))()

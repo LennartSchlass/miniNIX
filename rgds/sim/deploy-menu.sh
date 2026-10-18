@@ -9,14 +9,14 @@ case "${2:-start}" in
   start)
     ssh -o BatchMode=yes "$H" 'mkdir -p /storage/nds-menu'
     scp -q -o BatchMode=yes -r main.py sdl2.py fonts "$H:/storage/nds-menu/"
-    ssh -o BatchMode=yes "$H" 'systemctl stop essway; pkill -f /storage/nds-menu/main.py || true; sleep 1;
-      (. /etc/profile; cd /storage; nohup python3 /storage/nds-menu/main.py >/storage/nds-menu.log 2>&1 &); sleep 3;
-      export XDG_RUNTIME_DIR=/var/run/0-runtime-dir WAYLAND_DISPLAY=wayland-1;
+    ssh -o BatchMode=yes "$H" '. /etc/profile; export SWAYSOCK=/var/run/0-runtime-dir/sway-ipc.0.sock;
+      systemctl stop essway; pkill -f "[p]ython3 /storage/nds-menu/main.py" || true; sleep 1; cd /storage;
+      setsid nohup python3 /storage/nds-menu/main.py >/storage/nds-menu.log 2>&1 </dev/null & sleep 3;
       swaymsg -t get_tree | jq -r ".. | objects | select(.app_id? == \"ndsmenu\") | \"ndsmenu window: \(.type) \(.rect.x),\(.rect.y) \(.rect.width)x\(.rect.height) fullscreen=\(.fullscreen_mode)\"";
       tail -5 /storage/nds-menu.log'
     ;;
   stop)
-    ssh -o BatchMode=yes "$H" 'pkill -f /storage/nds-menu/main.py || true; systemctl start essway'
+    ssh -o BatchMode=yes "$H" 'pkill -f "[p]ython3 /storage/nds-menu/main.py" || true; systemctl start essway'
     ;;
   log)
     ssh -o BatchMode=yes "$H" 'tail -40 /storage/nds-menu.log'
