@@ -656,9 +656,10 @@ class Menu:
             self.press_direction(d if down else (0 if self.held == d else self.held))
         elif not down:
             return
-        elif b in (B.CONTROLLER_BUTTON_A, B.CONTROLLER_BUTTON_START):
+        # Nintendo layout: SDL's "B" (east) is the button labelled A on the RG DS
+        elif b in (B.CONTROLLER_BUTTON_B, B.CONTROLLER_BUTTON_START):
             self.start_game()
-        elif b in (B.CONTROLLER_BUTTON_BACK, B.CONTROLLER_BUTTON_Y):
+        elif b == B.CONTROLLER_BUTTON_BACK:
             self.settings()
         elif b == B.CONTROLLER_BUTTON_LEFTSHOULDER:
             self.move(-5)
