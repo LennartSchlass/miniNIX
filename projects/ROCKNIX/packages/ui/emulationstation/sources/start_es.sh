@@ -11,4 +11,9 @@ prerotate_env "${WLR_CON_TRANSFORM}" "${ES_MODE%%x*}"
 
 scanout_reset_stale
 
+# The RG DS boots into the two-screen DS menu, which starts EmulationStation itself for settings
+if [[ "${QUIRK_DEVICE}" == "Anbernic RG DS"* ]] && [ -x /usr/bin/nds-menu ] && [ "$(get_setting nds.menu)" != "0" ]; then
+  exec /usr/bin/nds-menu
+fi
+
 emulationstation --log-path /var/log --no-splash

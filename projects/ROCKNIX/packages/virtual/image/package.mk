@@ -37,6 +37,7 @@ if [ "${DS_ONLY}" = "yes" ]; then
   PKG_MULTIMEDIA="ffmpeg vlc"
   PKG_SYNC=""
   PKG_TOOLS+=" zip"
+  PKG_UI+=" nds-menu"
 fi
 
 if [ "${BASE_ONLY}" = "true" ]

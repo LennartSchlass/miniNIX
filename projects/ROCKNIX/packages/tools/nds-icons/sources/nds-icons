@@ -84,14 +84,26 @@ def load_banner(path):
     return None
 
 
-def banner_title(banner):
+def banner_lines(banner):
     for start in (0x340, 0x240):
         text = banner[start:start + 0x100].decode("utf-16-le", "replace").split("\0", 1)[0]
         lines = [l.strip() for l in text.splitlines() if l.strip()]
         if lines:
-            # the last of two or more lines is the publisher
-            return " - ".join(lines[:2]) if len(lines) >= 3 else lines[0]
-    return None
+            return lines
+    return []
+
+
+def banner_title(banner):
+    lines = banner_lines(banner)
+    if not lines:
+        return None
+    # the last of two or more lines is the publisher
+    return " - ".join(lines[:2]) if len(lines) >= 3 else lines[0]
+
+
+def banner_publisher(banner):
+    lines = banner_lines(banner)
+    return lines[-1] if len(lines) >= 2 else None
 
 
 def png_chunk(kind, data):
@@ -179,23 +191,25 @@ def main():
         need_image = game is None or not game.findtext("image", "").strip()
         # a name equal to the file name is the ES default, not user data
         need_name = not name or (need_image and name == os.path.basename(stem))
-        if not need_name and not need_image:
+        need_publisher = game is None or not game.findtext("publisher", "").strip()
+        if not need_name and not need_image and not need_publisher:
             continue
 
         icon_rel = os.path.join("images", stem + "-image.png")
         icon = os.path.join(romdir, icon_rel)
         need_icon = need_image and not os.path.exists(icon)
-        title = None
-        if need_name or need_icon:
+        title = publisher = None
+        if need_name or need_icon or need_publisher:
             banner = load_banner(full)
             if banner is None:
                 continue
             title = banner_title(banner)
+            publisher = banner_publisher(banner)
             if need_icon:
                 os.makedirs(os.path.dirname(icon), exist_ok=True)
                 write_atomic(icon, icon_png(banner))
 
-        if not need_image and not title:
+        if not need_image and not title and not publisher:
             continue
         if game is None:
             game = ET.SubElement(root, "game")
@@ -204,6 +218,8 @@ def main():
             set_child(game, "name", title)
         if need_image:
             set_child(game, "image", "./" + icon_rel)
+        if need_publisher and publisher:
+            set_child(game, "publisher", publisher)
         changed = True
 
     if changed:

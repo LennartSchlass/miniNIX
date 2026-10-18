@@ -109,7 +109,7 @@ export DSHOOK_SHADER="${SHADER:-none}"
 kill ${LASTGAME_TIMER} 2>/dev/null
 kill -9 $(pidof gptokeyb)
 
-# The bottom screen is only used by DraStic, don't leave it lit behind ES.
-if [[ "${QUIRK_DEVICE}" == "Anbernic RG DS"* && "${SDL_VIDEO_DISPLAY_PRIORITY}" == *,* ]]; then
+# The bottom screen is only used by DraStic (and the DS menu), don't leave it lit behind ES.
+if [[ "${QUIRK_DEVICE}" == "Anbernic RG DS"* && "${SDL_VIDEO_DISPLAY_PRIORITY}" == *,* && -z "${NDS_MENU}" ]]; then
   swaymsg output "${SDL_VIDEO_DISPLAY_PRIORITY#*,}" power off >/dev/null
 fi

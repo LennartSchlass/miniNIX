@@ -1,8 +1,7 @@
-diff --git a/CMakeLists.txt b/CMakeLists.txt
-index b483915..9ac7565 100644
---- a/CMakeLists.txt
-+++ b/CMakeLists.txt
-@@ -21,6 +21,7 @@ option(BCM "BCM host" OFF)
+diff -Naur a/CMakeLists.txt b/CMakeLists.txt
+--- a/CMakeLists.txt	2026-10-18 19:39:04.709523758 +0200
++++ b/CMakeLists.txt	2026-10-18 19:39:05.182822366 +0200
+@@ -21,6 +21,7 @@
  option(BATOCERA "Set to ON to enable BATOCERA specific code" OFF)
  option(RETROBAT "Set to ON to enable RETROBAT specific code" OFF)
  option(ROCKNIX "Set to ON to enable ROCKNIX specific code" OFF)
@@ -10,7 +9,7 @@ index b483915..9ac7565 100644
  
  option(ENABLE_FILEMANAGER "Set to ON to enable f1 shortcut for filesystem" OFF)
  option(DISABLE_KODI "Set to ON to disable kodi in menu" OFF)
-@@ -126,6 +127,11 @@ if(ROCKNIX)
+@@ -126,6 +127,11 @@
    add_definitions(-DROCKNIX)
  endif()
  
@@ -22,11 +21,10 @@ index b483915..9ac7565 100644
  if(BATTERYPLUS)
    MESSAGE("batteryplus build")
    add_definitions(-DBATTERYPLUS)
-diff --git a/es-app/src/NetworkThread.cpp b/es-app/src/NetworkThread.cpp
-index 98d6205..6db76bd 100644
---- a/es-app/src/NetworkThread.cpp
-+++ b/es-app/src/NetworkThread.cpp
-@@ -19,8 +19,10 @@ NetworkThread::NetworkThread(Window* window) : mWindow(window)
+diff -Naur a/es-app/src/NetworkThread.cpp b/es-app/src/NetworkThread.cpp
+--- a/es-app/src/NetworkThread.cpp	2026-10-18 19:39:04.722466994 +0200
++++ b/es-app/src/NetworkThread.cpp	2026-10-18 19:39:05.182902231 +0200
+@@ -19,8 +19,10 @@
  	mgr->RegisterComponent(new BatteryLevelWatcher());
  	mgr->RegisterComponent(new NetworkStateWatcher());
  
@@ -37,11 +35,10 @@ index 98d6205..6db76bd 100644
  
  	if (ApiSystem::getInstance()->isScriptingSupported(ApiSystem::PADSINFO))
  		mgr->RegisterComponent(&mCheckPadsBatteryLevelComponent);
-diff --git a/es-app/src/guis/GuiGameOptions.cpp b/es-app/src/guis/GuiGameOptions.cpp
-index d1e9857..d3028a4 100644
---- a/es-app/src/guis/GuiGameOptions.cpp
-+++ b/es-app/src/guis/GuiGameOptions.cpp
-@@ -393,6 +393,7 @@ GuiGameOptions::GuiGameOptions(Window* window, FileData* game) : GuiComponent(wi
+diff -Naur a/es-app/src/guis/GuiGameOptions.cpp b/es-app/src/guis/GuiGameOptions.cpp
+--- a/es-app/src/guis/GuiGameOptions.cpp	2026-10-18 19:39:04.737142832 +0200
++++ b/es-app/src/guis/GuiGameOptions.cpp	2026-10-18 19:39:05.182969857 +0200
+@@ -393,6 +393,7 @@
  	{
  		mMenu.addGroup(_("OPTIONS"));
  		
@@ -49,7 +46,7 @@ index d1e9857..d3028a4 100644
  		mMenu.addEntry(_("SCRAPE"), false, [this, game]
  		{
  			ScraperSearchParams scraperParams;
-@@ -413,6 +414,7 @@ GuiGameOptions::GuiGameOptions(Window* window, FileData* game) : GuiComponent(wi
+@@ -413,6 +414,7 @@
  
  			close();
  		});
@@ -57,11 +54,10 @@ index d1e9857..d3028a4 100644
  
  		if (ApiSystem::getInstance()->isScriptingSupported(ApiSystem::ScriptId::EVMAPY) && game->getType() != FOLDER)
  		{
-diff --git a/es-app/src/guis/GuiMenu.cpp b/es-app/src/guis/GuiMenu.cpp
-index 2a2a408..624caea 100644
---- a/es-app/src/guis/GuiMenu.cpp
-+++ b/es-app/src/guis/GuiMenu.cpp
-@@ -158,6 +158,7 @@ GuiMenu::GuiMenu(Window *window, bool animate) : GuiComponent(window), mMenu(win
+diff -Naur a/es-app/src/guis/GuiMenu.cpp b/es-app/src/guis/GuiMenu.cpp
+--- a/es-app/src/guis/GuiMenu.cpp	2026-10-18 19:39:04.741933469 +0200
++++ b/es-app/src/guis/GuiMenu.cpp	2026-10-18 19:39:05.195115274 +0200
+@@ -158,6 +158,7 @@
  	}, "iconKodi");	
  #endif
  
@@ -69,7 +65,7 @@ index 2a2a408..624caea 100644
  	if (ApiSystem::getInstance()->isScriptingSupported(ApiSystem::RETROACHIVEMENTS) &&
  		SystemConf::getInstance()->getBool("global.retroachievements") &&
  		Settings::getInstance()->getBool("RetroachievementsMenuitem") && 
-@@ -166,6 +167,7 @@ GuiMenu::GuiMenu(Window *window, bool animate) : GuiComponent(window), mMenu(win
+@@ -166,6 +167,7 @@
  				if (!checkNetwork())
  					return;
  				GuiRetroAchievements::show(mWindow); }, "iconRetroachievements");
@@ -77,7 +73,7 @@ index 2a2a408..624caea 100644
  	
  	if (isFullUI)
  	{
-@@ -173,7 +175,9 @@ GuiMenu::GuiMenu(Window *window, bool animate) : GuiComponent(window), mMenu(win
+@@ -173,7 +175,9 @@
  		addEntry(_("GAME SETTINGS").c_str(), true, [this] { openGamesSettings(); }, "iconGames");
  		addEntry(GuiControllersSettings::getControllersSettingsLabel(), true, [window] { GuiControllersSettings::openControllersSettings(window); }, "iconControllers");
  		addEntry(_("USER INTERFACE SETTINGS").c_str(), true, [this] { openUISettings(); }, "iconUI");
@@ -87,7 +83,7 @@ index 2a2a408..624caea 100644
  		addEntry(_("SOUND SETTINGS").c_str(), true, [this] { openSoundSettings(); }, "iconSound");
  
  		if (ApiSystem::getInstance()->isScriptingSupported(ApiSystem::WIFI))
-@@ -205,12 +209,14 @@ GuiMenu::GuiMenu(Window *window, bool animate) : GuiComponent(window), mMenu(win
+@@ -205,12 +209,14 @@
  		}
  #endif
  
@@ -102,7 +98,7 @@ index 2a2a408..624caea 100644
  
  		addEntry(_("SYSTEM SETTINGS").c_str(), true, [this] { openSystemSettings(); }, "iconSystem");
  	}
-@@ -280,6 +286,7 @@ void GuiMenu::openResetOptions()
+@@ -280,6 +286,7 @@
  	});
  
  	s->addGroup(_("EMULATOR MANAGEMENT"));
@@ -110,7 +106,7 @@ index 2a2a408..624caea 100644
  	s->addEntry(_("RESET RETROARCH CONFIG TO DEFAULT"), true, [window] {
  	window->pushGui(new GuiMsgBox(window, _("WARNING: RETROARCH CONFIG WILL RESET TO DEFAULT\n\nPER-CORE CONFIGURATIONS WILL NOT BE AFFECTED AND NO BACKUP WILL BE CREATED!\n\nRESET RETROARCH CONFIG TO DEFAULT?"), _("YES"),
  		[] {
-@@ -307,6 +314,7 @@ void GuiMenu::openResetOptions()
+@@ -307,6 +314,7 @@
  		Utils::Platform::runSystemCommand("/usr/bin/run \"/usr/bin/factoryreset mednafen\"", "", nullptr);
  		}, _("NO"), nullptr));
  	});
@@ -118,7 +114,7 @@ index 2a2a408..624caea 100644
  
  	s->addEntry(_("RESET STANDALONE EMULATOR CONFIGS TO DEFAULT"), true, [window] {
  	window->pushGui(new GuiMsgBox(window, _("WARNING: STANDALONE EMULATOR CONFIGS WILL RESET TO DEFAULT\n\nNO BACKUP WILL BE CREATED!\n\nRESET STANDALONE EMULATOR CONFIGS TO DEFAULT?"), _("YES"),
-@@ -315,12 +323,14 @@ void GuiMenu::openResetOptions()
+@@ -315,12 +323,14 @@
  		}, _("NO"), nullptr));
  	});
  
@@ -133,7 +129,7 @@ index 2a2a408..624caea 100644
  
  	s->addGroup(_("SYSTEM MANAGEMENT"));
  
-@@ -1196,6 +1206,7 @@ void GuiMenu::openDeveloperSettings()
+@@ -1196,6 +1206,7 @@
  	s->addSaveFunc([fullExitMenu] { Settings::getInstance()->setBool("ShowOnlyExit", !fullExitMenu->getState()); });
  #endif
  
@@ -141,7 +137,7 @@ index 2a2a408..624caea 100644
  	if (ApiSystem::getInstance()->isScriptingSupported(ApiSystem::GAMESETTINGS))
  	{
  		auto retroarchRgui = std::make_shared< OptionListComponent<std::string> >(mWindow, _("RETROARCH MENU DRIVER"), false);
-@@ -1203,6 +1214,7 @@ void GuiMenu::openDeveloperSettings()
+@@ -1203,6 +1214,7 @@
  		s->addWithLabel(_("RETROARCH MENU DRIVER"), retroarchRgui);
  		s->addSaveFunc([retroarchRgui] { SystemConf::getInstance()->set("global.retroarch.menu_driver", retroarchRgui->getSelected()); });
  	}
@@ -149,7 +145,7 @@ index 2a2a408..624caea 100644
  #if !defined(ROCKNIX)
  	auto invertJoy = std::make_shared<SwitchComponent>(mWindow);
  	invertJoy->setState(Settings::getInstance()->getBool("InvertButtons"));
-@@ -3965,6 +3977,7 @@ void GuiMenu::openGamesSettings()
+@@ -3965,6 +3977,7 @@
  	// Game List Update
  	s->addEntry(_("UPDATE GAMELISTS"), false, [this, window] { updateGameLists(window); });
  
@@ -157,7 +153,7 @@ index 2a2a408..624caea 100644
  	s->addEntry(_("MOONLIGHT GAME STREAMING"), false, [this, window] { GuiMoonlight::show(mWindow); });
  
  	if (SystemConf::getInstance()->getBool("global.retroachievements") && !Settings::getInstance()->getBool("RetroachievementsMenuitem") && SystemConf::getInstance()->get("global.retroachievements.username") != "")
-@@ -3989,6 +4002,7 @@ void GuiMenu::openGamesSettings()
+@@ -3989,6 +4002,7 @@
  	// Netplay
  	if (SystemData::isNetplayActivated() && ApiSystem::getInstance()->isScriptingSupported(ApiSystem::NETPLAY))
  		s->addEntry(_("NETPLAY SETTINGS"), true, [this] { openNetplaySettings(); }, "iconNetplay");
@@ -165,7 +161,7 @@ index 2a2a408..624caea 100644
  
  	// Missing Bios
  	if (ApiSystem::getInstance()->isScriptingSupported(ApiSystem::BIOSINFORMATION))
-@@ -4002,6 +4016,7 @@ void GuiMenu::openGamesSettings()
+@@ -4002,6 +4016,7 @@
  		s->addSaveFunc([checkBiosesAtLaunch] { Settings::getInstance()->setBool("CheckBiosesAtLaunch", checkBiosesAtLaunch->getState()); });
  	}
  
@@ -173,7 +169,7 @@ index 2a2a408..624caea 100644
  	// Custom config for systems
  	s->addGroup(_("SAVESTATES"));
  
-@@ -4027,9 +4042,11 @@ void GuiMenu::openGamesSettings()
+@@ -4027,9 +4042,11 @@
  	showSaveStates->addRange({ { _("NO"), "auto" },{ _("ALWAYS") , "1" },{ _("IF NOT EMPTY") , "2" } }, SystemConf::getInstance()->get("global.savestates"));
  	s->addWithDescription(_("SHOW SAVESTATE MANAGER"), _("Display savestate manager before launching a game."), showSaveStates);
  	s->addSaveFunc([showSaveStates] { SystemConf::getInstance()->set("global.savestates", showSaveStates->getSelected()); });
@@ -185,7 +181,7 @@ index 2a2a408..624caea 100644
  	// Screen ratio choice
  	if (!hasGlobalFeature("ratio"))
  	{
-@@ -4292,6 +4309,7 @@ void GuiMenu::openGamesSettings()
+@@ -4292,6 +4309,7 @@
  			mWindow->pushGui(ai_service);
  		});
  	}
@@ -193,7 +189,7 @@ index 2a2a408..624caea 100644
  	
  	// Load global custom features
  	addFeatures(CustomFeatures::GlobalFeatures, window, s, "global", "", "", "", _("DEFAULT GLOBAL SETTINGS"));
-@@ -5861,6 +5879,7 @@ void GuiMenu::openNetworkSettings(bool selectWifiEnable, bool selectAdhocEnable)
+@@ -5861,6 +5879,7 @@
  		}
  	});
  
@@ -201,7 +197,7 @@ index 2a2a408..624caea 100644
  	// CLOUD SERVICES
  	s->addGroup(_("CLOUD SERVICES"));
  
-@@ -5891,6 +5910,7 @@ void GuiMenu::openNetworkSettings(bool selectWifiEnable, bool selectAdhocEnable)
+@@ -5891,6 +5910,7 @@
  		bool cloudenabled = mount_cloud->getState();
  		SystemConf::getInstance()->set("clouddrive.mounted", cloudenabled ? "1" : "0");
  	});
@@ -209,3 +205,24 @@ index 2a2a408..624caea 100644
  
  	s->addGroup(_("VPN SERVICES"));
  
+@@ -6117,11 +6137,20 @@
+ 	if (quickAccessMenu)
+ 		s->addGroup(_("QUIT"));
+ 
++#ifdef ROCKNIX_DS_ONLY
++	// On the RG DS EmulationStation is started by the DS menu; quitting returns there
++	s->addEntry("ZURÜCK ZUM DS-MENÜ", false, [window] {
++		window->pushGui(new GuiMsgBox(window, "ZURÜCK ZUM DS-MENÜ?",
++			_("YES"), [] { Utils::Platform::quitES(Utils::Platform::QuitMode::QUIT); },
++			_("NO"), nullptr));
++	}, "iconRestart");
++#else
+ 	s->addEntry(_("RESTART EMULATIONSTATION"), false, [window] {
+ 		window->pushGui(new GuiMsgBox(window, _("REALLY RESTART EMULATIONSTATION?"),
+ 			_("YES"), [] { Utils::Platform::quitES(Utils::Platform::QuitMode::QUIT); },
+ 			_("NO"), nullptr));
+ 	}, "iconRestart");
++#endif
+ 
+ 	s->addEntry(_("RESTART SYSTEM"), false, [window] {
+ 		window->pushGui(new GuiMsgBox(window, _("REALLY RESTART?"), 

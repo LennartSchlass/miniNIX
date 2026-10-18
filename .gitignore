@@ -48,3 +48,4 @@ projects/**/*.old
 /.env
 /.es_cache
 /.config
+__pycache__/
