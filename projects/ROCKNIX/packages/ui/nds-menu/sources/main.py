@@ -159,6 +159,11 @@ def window_rect(app_id):
     return None
 
 
+def top_output():
+    pri = os.environ.get("SDL_VIDEO_DISPLAY_PRIORITY", "")
+    return pri.split(",")[0] if pri else ""
+
+
 def second_output():
     pri = os.environ.get("SDL_VIDEO_DISPLAY_PRIORITY", "")
     return pri.split(",")[1] if "," in pri else ""
@@ -278,6 +283,7 @@ class Menu:
         self.child_label = ""
         self.child_seen = 0.0
         self.bottom_restore = False
+        self.child_placed = False
         self.pages = []           # settings page stack, empty = the shelf
         self.confirm = None       # [message, callback, cursor]
         self.touch_log = 0
@@ -1246,6 +1252,9 @@ class Menu:
         self.drag = None
         env = {k: v for k, v in os.environ.items() if k not in ("SDL_VIDEO_WAYLAND_WMCLASS", "SDL_APP_ID")}
         env.update(extra_env or {})
+        # New windows open on the focused output; DraStic's spans from there to the right
+        if top_output():
+            sway("focus", "output", top_output())
         try:
             self.child = subprocess.Popen(cmd, env=env)
         except OSError as e:
@@ -1254,6 +1263,7 @@ class Menu:
         self.child_kind, self.child_label = kind, label
         self.child_seen = 0.0
         self.bottom_restore = kind == "settings"
+        self.child_placed = False
         self.dirty = True
 
     def start_game(self):
@@ -1287,6 +1297,12 @@ class Menu:
             return
         if self.child_seen < 0 and now + self.child_seen > 8:
             self.child.kill()
+        elif self.child_kind == "game" and not self.child_placed and top_output():
+            r = window_rect("drastic")
+            if r:
+                self.child_placed = True
+                if r[0] != 0:
+                    sway('[app_id="drastic"]', "move", "container", "to", "output", top_output())
         elif self.bottom_restore:
             # sway's EmulationStation rules may switch the bottom screen off once its
             # window appears; put it back on for the panel a moment later
