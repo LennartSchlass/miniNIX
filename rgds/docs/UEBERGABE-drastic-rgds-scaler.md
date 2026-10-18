@@ -266,3 +266,31 @@ DS-Besonderheit: 2D und 3D kommen bereits zusammengesetzt an, lassen sich also n
 4. `/storage/.config/drastic/` → stderr-Log auf `[drastouch] shader_program=` ≠ 0 prüfen.
 5. Vergleich `sharp-shimmerless` (jetzt highp) vs. `area-sharp` vs. bilinear mit `grim`-Screenshots; FPS mit DraStic-Framecounter (`show_frame_counter = 1`).
 6. Danach PR an ROCKNIX (AGENTS.md verlangt `.img.gz`/`.tar`-Artefakte für betroffene Geräte im PR).
+
+---
+
+## 10. DS-only-Image „miniNIX“ (Branch `rgds-ds-only`, Fork github.com/LennartSchlass/miniNIX)
+
+Remotes: `origin` = Fork (SSH), `upstream` = ROCKNIX/distribution. `drastic-area-shader` bleibt PR-Kandidat (nur Shader).
+
+| Commit | Inhalt |
+|---|---|
+| RK3566: DS-only build | `DS_ONLY=yes`, `ENABLE_32BIT=no`, `DEBUG_PACKAGES=no` in `devices/RK3566/options`; Image-Plan 693 → 427 Pakete; es_systems = nds, tools, imageviewer |
+| emulationstation | `patches/RK3566/ds-only-menu.patch` (`#ifndef ROCKNIX_DS_ONLY`): ohne Scraper, Updates (+ Update-Hinweis), RetroAchievements, Collections, Netplay, Moonlight, Cloud, RetroArch/PortMaster; `050-es_settings`: Start in NDS-Liste, Rest versteckt |
+| nds-icons | Banner-Icon + Titel aus .nds/.zip/.7z → `images/<rom>-image.png` (128 px) + gamelist.xml, beim Boot vor ES |
+| RG DS Komfort | Defaults `nds.shader=area-sharp`, `nds.threaded_3d=1`, `nds.bootlastgame=1`; Deckel (logind-Holdoff 5 s, Fake-Suspend kennt `gpio-keys-hall`); unterer Screen nach DraStic aus; Boot ins letzte Spiel über ES-„startup game“, einmal pro Boot, nur nach ≥ 15 s Spielzeit |
+
+Build: `make docker-RK3566` (braucht Docker-Desktop-WSL-Integration). Ergebnis in `release/`. Achtung: Build überschreibt `documentation/PER_DEVICE_DOCUMENTATION/RK3566/SUPPORTED_EMULATORS_AND_CORES.md` – nicht committen.
+
+Hinweis: Defaults in `system.cfg` greifen nur bei frischem `/storage` (Neu-Flash), nicht beim Update einer bestehenden Installation.
+
+### Test-Checkliste am Gerät
+- [ ] ES startet direkt in der NDS-Liste; keine anderen Systeme/Sammlungen; Menü ohne Scraper/Updates.
+- [ ] Spiele zeigen DS-Icons + Titel (`.nds`, `.zip`, `.7z`); erster Boot mit vielen gepackten ROMs evtl. langsamer.
+- [ ] Shader `area-sharp` aktiv (Spiel → erweiterte Optionen); Vergleich mit `sharp-shimmerless`; FPS.
+- [ ] Deckel zu → Standby (auch < 30 s nach Boot/Aufwachen), Deckel auf → weiter; DraStic läuft nach Resume weiter.
+- [ ] `udevadm info` am Hall-Gerät: `ID_INPUT_SWITCH=1`, TAGS enthält `power-switch`.
+- [ ] Mit `system.suspendmode=off`: Fake-Suspend per Deckel.
+- [ ] Nach Beenden von DraStic ist der untere Screen aus; Touch-Tastatur in ES geht noch.
+- [ ] Boot ins letzte Spiel: beide Screens + Touch ok; nach Beenden erscheint ES; Spiel < 15 s beendet/Absturz → kein Auto-Start beim nächsten Boot; gelöschte ROM wird übersprungen. Abschalten: `nds.bootlastgame=0` in `/storage/.config/system/configs/system.cfg`.
+- [ ] WLAN, SSH, Samba funktionieren.
