@@ -3,14 +3,16 @@
 # Copyright (C) 2026-present ROCKNIX (https://github.com/ROCKNIX)
 
 # DS-style launcher for the Anbernic RG DS. One 1280x480 window spans both panels like
-# DraStic's does: the left half is the top screen (banner, clock, battery), the right
-# half the touch screen (a shelf of game cards, settings, standby).
+# DraStic's does: the left half is the top screen (banner, clock, battery, help), the
+# right half the touch screen (a shelf of game cards, settings pages, standby).
 
 import ctypes
 import glob
 import json
 import math
 import os
+import re
+import shutil
 import subprocess
 import sys
 import time
@@ -23,6 +25,7 @@ import sdl2 as sdl  # noqa: E402
 
 HERE = Path(__file__).resolve().parent
 ROMS = Path(os.environ.get("NDS_MENU_ROMS", "/storage/roms/nds"))
+CFG = Path(os.environ.get("NDS_MENU_CFG", "/storage/.config/system/configs/system.cfg"))
 FONT = str(HERE / "fonts" / "PixelOperator.ttf")
 FONT_BOLD = str(HERE / "fonts" / "PixelOperator-Bold.ttf")
 APP_ID = "ndsmenu"
@@ -32,6 +35,7 @@ WIN_W, WIN_H = 2 * SCREEN_W, SCREEN_H
 STEP = 170          # distance between cards on the shelf
 SHELF_Y = 214       # vertical centre of the shelf
 NO_SWAY = bool(os.environ.get("NDS_MENU_NO_SWAY"))
+ROW_H, ROW_Y0, ROWS = 54, 72, 6
 
 # DS Lite inspired palette
 C_TOP_BG = (236, 241, 246)
@@ -49,23 +53,46 @@ C_GREEN = (82, 176, 94)
 C_ORANGE = (236, 150, 48)
 C_RED = (224, 72, 72)
 C_CARD_NOTCH = (206, 216, 226)
+C_TRACK = (200, 212, 224)
 
 DAYS = ["Mo", "Di", "Mi", "Do", "Fr", "Sa", "So"]
 MONTHS = ["Jan.", "Feb.", "März", "Apr.", "Mai", "Juni", "Juli", "Aug.", "Sep.", "Okt.", "Nov.", "Dez."]
 
+SHADERS = [("nitro-sharp", "nitro-sharp"), ("sharp-shimmerless", "sharp-shimmerless"),
+           ("sharp-bilinear", "sharp-bilinear"), ("bilinear", "bilinear (weich)"), ("quilez", "quilez"),
+           ("scanlines", "scanlines"), ("lcd3x", "lcd3x"), ("lcd1x-nds-color", "lcd1x + nds-color")]
+BOLT = ["....##.", "...##..", "..##...", ".######", "....##.", "...##..", "..##...", ".##...."]
+
 
 class Game:
-    def __init__(self, path, name, image, publisher, playcount, lastplayed):
-        self.path, self.name, self.image = path, name, image
-        self.publisher, self.playcount, self.lastplayed = publisher, playcount, lastplayed
+    def __init__(self, path, name, image, publisher, playcount):
+        self.path, self.name, self.image, self.publisher, self.playcount = path, name, image, publisher, playcount
         self.tex = None
 
+    @property
+    def title(self):
+        return self.name.split(" - ", 1)[0]
 
+
+class Item:
+    def __init__(self, kind, label, help="", get=None, set=None, do=None, choices=None, lo=0, hi=100, step=5, danger=False):
+        self.kind, self.label, self.help = kind, label, help
+        self.get, self.set, self.do, self.choices = get, set, do, choices
+        self.lo, self.hi, self.step, self.danger = lo, hi, step, danger
+
+
+class Page:
+    def __init__(self, title, items, help=""):
+        self.title, self.items, self.help = title, items, help
+        self.cursor = 0
+        self.scroll = 0
+
+
+# ---------- system helpers ----------
 def load_games(romdir):
-    xml = romdir / "gamelist.xml"
     games = []
     try:
-        root = ET.parse(xml).getroot()
+        root = ET.parse(romdir / "gamelist.xml").getroot()
     except (ET.ParseError, OSError):
         return games
     for g in root.iter("game"):
@@ -77,13 +104,12 @@ def load_games(romdir):
             continue
         img = (g.findtext("image") or "").strip()
         img = str(romdir / img) if img and not os.path.isabs(img) else img
-        name = (g.findtext("name") or "").strip() or full.stem
         try:
             playcount = int(g.findtext("playcount") or 0)
         except ValueError:
             playcount = 0
-        games.append(Game(str(full), name, img, (g.findtext("publisher") or "").strip(),
-                          playcount, (g.findtext("lastplayed") or "").strip()))
+        games.append(Game(str(full), (g.findtext("name") or "").strip() or full.stem, img,
+                          (g.findtext("publisher") or "").strip(), playcount))
     games.sort(key=lambda g: g.name.lower())
     return games
 
@@ -92,31 +118,34 @@ def battery():
     for d in glob.glob("/sys/class/power_supply/[Bb][Aa][Tt]*"):
         try:
             cap = int(open(d + "/capacity").read())
-            status = open(d + "/status").read().strip()
-            return cap, status.lower() in ("charging", "full")
+            status = open(d + "/status").read().strip().lower()
+            return cap, status in ("charging", "full")
         except (OSError, ValueError):
             pass
     fake = os.environ.get("NDS_MENU_FAKE_BATTERY")
-    return (int(fake), False) if fake else (None, False)
+    return (int(fake.rstrip("+")), fake.endswith("+")) if fake else (None, False)
 
 
-def sway(*args, capture=False):
+def run(cmd, capture=False):
     if NO_SWAY:
+        print("would run:", " ".join(cmd), file=sys.stderr)
         return ""
     try:
-        r = subprocess.run(["swaymsg", *args], stdout=subprocess.PIPE if capture else subprocess.DEVNULL,
-                           stderr=subprocess.DEVNULL, timeout=5)
+        r = subprocess.run(cmd, stdout=subprocess.PIPE if capture else subprocess.DEVNULL,
+                           stderr=subprocess.DEVNULL, timeout=15)
         return r.stdout.decode(errors="replace") if capture else ""
     except (OSError, subprocess.TimeoutExpired):
         return ""
 
 
+def sway(*args, capture=False):
+    return run(["swaymsg", *args], capture)
+
+
 def window_rect(app_id):
     tree = sway("-t", "get_tree", capture=True)
-    if not tree:
-        return None
     try:
-        nodes = [json.loads(tree)]
+        nodes = [json.loads(tree)] if tree else []
     except ValueError:
         return None
     while nodes:
@@ -133,6 +162,87 @@ def second_output():
     return pri.split(",")[1] if "," in pri else ""
 
 
+def cfg_read():
+    d = {}
+    try:
+        for line in CFG.read_text(errors="replace").splitlines():
+            if "=" in line and not line.startswith("#"):
+                k, v = line.split("=", 1)
+                d[k] = v
+    except OSError:
+        pass
+    return d
+
+
+def cfg_set(key, value):
+    """Like set_setting / del_setting (value None): one key=value line per setting."""
+    try:
+        lines = CFG.read_text(errors="replace").splitlines()
+    except OSError:
+        lines = []
+    lines = [l for l in lines if not l.startswith(key + "=")]
+    if value is not None:
+        lines.append(f"{key}={value}")
+    tmp = CFG.with_name(CFG.name + ".ndsmenu")
+    try:
+        tmp.write_text("\n".join(lines) + "\n")
+        os.replace(tmp, CFG)
+    except OSError as e:
+        print("cannot write", CFG, e, file=sys.stderr)
+
+
+def backlights():
+    devs = sorted(glob.glob("/sys/class/backlight/*"))
+    if not devs and os.environ.get("NDS_MENU_FAKE_BACKLIGHTS"):
+        return [None] * int(os.environ["NDS_MENU_FAKE_BACKLIGHTS"])
+    return devs
+
+
+def backlight_percent(dev):
+    if dev is None:
+        return 70
+    try:
+        return round(100 * int(open(dev + "/brightness").read()) / max(1, int(open(dev + "/max_brightness").read())))
+    except (OSError, ValueError):
+        return 50
+
+
+def ip_address():
+    out = run(["ip", "-4", "-o", "addr", "show"], capture=True)
+    for pref in ("wlan", "eth", "usb", "end"):
+        for line in out.splitlines():
+            m = re.match(r"\d+:\s+(\S+)\s+inet\s+([\d.]+)", line)
+            if m and m.group(1).startswith(pref):
+                return m.group(2)
+    return "nicht verbunden"
+
+
+def os_release(key):
+    try:
+        for line in open("/etc/os-release"):
+            if line.startswith(key + "="):
+                return line.split("=", 1)[1].strip().strip('"')
+    except OSError:
+        pass
+    return "?"
+
+
+def free_space(path):
+    try:
+        st = shutil.disk_usage(path)
+        return f"{st.free / 2**30:.1f} GB frei von {st.total / 2**30:.0f} GB"
+    except OSError:
+        return "?"
+
+
+def uptime():
+    try:
+        s = int(float(open("/proc/uptime").read().split()[0]))
+        return f"{s // 3600} h {s % 3600 // 60} min"
+    except (OSError, ValueError):
+        return "?"
+
+
 def ease(t):
     return 1 - (1 - t) ** 3
 
@@ -145,15 +255,16 @@ class Menu:
         self.anim_from = 0.0
         self.anim_t0 = 0.0
         self.animating = False
-        self.drag = None          # (x0, pos0, moved, samples)
+        self.drag = None          # [x0, pos0, moved, samples]
+        self.slider_drag = None   # (item, x, w) being dragged
         self.held = 0
-        self.held_since = 0.0
         self.next_repeat = 0.0
         self.axis_dir = 0
         self.controllers = {}
         self.joysticks = {}
         self.textures = {}        # text cache
         self.shapes = {}          # corner textures per radius
+        self.bitmaps = {}
         self.stripe_rects = {}
         self.fonts = {}
         self.dirty = True
@@ -163,9 +274,12 @@ class Menu:
         self.child = None         # Popen of the running game or EmulationStation
         self.child_kind = ""
         self.child_label = ""
-        self.child_seen = 0.0     # when the child's window showed up
+        self.child_seen = 0.0
         self.bottom_restore = False
+        self.pages = []           # settings page stack, empty = the shelf
+        self.confirm = None       # [message, callback, cursor]
         self.touch_log = 0
+        self.pads = False
 
     # ---------- setup ----------
     def run(self):
@@ -188,11 +302,8 @@ class Menu:
         sdl.IMG_Init(sdl.IMG_INIT_PNG)
         sdl.TTF_Init()
 
-        # Span both panels like DraStic. Sway centres the floating window on the seam first,
-        # which changes its workspace, so the move is issued twice (same as the Duo Lite rule).
         sway("for_window", f'[app_id="{APP_ID}"]', "floating", "enable,", "border", "none,",
-             "resize", "set", str(WIN_W), str(WIN_H) + ",", "move", "absolute", "position", "0", "0,",
-             "move", "absolute", "position", "0", "0")
+             "resize", "set", str(WIN_W), str(WIN_H) + ",", "move", "absolute", "position", "0", "0")
         self.window = sdl.CreateWindow(APP_ID.encode(), 0, 0, WIN_W, WIN_H, sdl.WINDOW_SHOWN | sdl.WINDOW_BORDERLESS)
         if not self.window:
             print("SDL_CreateWindow:", sdl.error(), file=sys.stderr)
@@ -209,8 +320,13 @@ class Menu:
         shot = os.environ.get("NDS_MENU_SHOT")
         if shot:
             self.select(int(os.environ.get("NDS_MENU_SEL", "0")), False)
-            if os.environ.get("NDS_MENU_PANEL"):
-                self.child, self.child_kind, self.child_label = True, os.environ["NDS_MENU_PANEL"], "Testspiel läuft …"
+            panel = os.environ.get("NDS_MENU_PANEL")
+            if panel in ("settings", "game"):
+                self.child, self.child_kind, self.child_label = True, panel, "Testspiel läuft …"
+            elif panel == "confirm":
+                self.ask("Gerät ausschalten?", lambda: None)
+            elif panel:
+                self.open_page(panel)
             self.draw()
             self.screenshot(shot)
             return 0
@@ -301,6 +417,103 @@ class Menu:
                         game.tex = tex
         return game.tex or None
 
+    # ---------- settings pages ----------
+    def setting(self, key, default=""):
+        return cfg_read().get(key, default)
+
+    def game_key(self, game, key):
+        return f'nds["{os.path.basename(game.path)}"].{key}'
+
+    def open_page(self, name, game=None):
+        builders = {"settings": self.page_settings, "display": self.page_display, "drastic": self.page_drastic,
+                    "network": self.page_network, "info": self.page_info}
+        if name in builders:
+            self.pages.append(builders[name](game) if name == "drastic" else builders[name]())
+            self.dirty = True
+
+    def page_settings(self):
+        return Page("Einstellungen", [
+            Item("action", "Standby", "Gerät schlafen legen. Aufwecken mit der Power-Taste oder durch Aufklappen.", do=self.sleep),
+            Item("action", "Neustart", "Gerät neu starten.", do=lambda: self.ask("Gerät neu starten?", lambda: run(["systemctl", "reboot"]))),
+            Item("action", "Ausschalten", "Gerät herunterfahren und ausschalten.",
+                 do=lambda: self.ask("Gerät ausschalten?", lambda: run(["systemctl", "poweroff"])), danger=True),
+            Item("submenu", "Anzeige & Ton", "Helligkeit der Bildschirme und Lautstärke.", do=lambda: self.open_page("display")),
+            Item("submenu", "DraStic", "Voreinstellungen für alle Spiele: Bildfilter, Hi-Res 3D, Threaded 3D.", do=lambda: self.open_page("drastic")),
+            Item("submenu", "Netzwerk", "SSH, Samba-Freigabe, IP-Adresse. WLAN wird in EmulationStation eingerichtet.", do=lambda: self.open_page("network")),
+            Item("submenu", "Info", "Version, Akku, Speicherplatz.", do=lambda: self.open_page("info")),
+            Item("submenu", "Erweitert: EmulationStation", "Öffnet die vollständige ROCKNIX-Oberfläche oben, z. B. für WLAN, Bluetooth, Zeitzone.", do=self.emulationstation),
+        ])
+
+    def page_display(self):
+        items = []
+        devs = backlights()
+        names = {0: "unten", 1: "oben"} if len(devs) == 2 else {}
+        for i, dev in enumerate(devs):
+            label = "Helligkeit " + names.get(i, str(i + 1)) if len(devs) > 1 else "Helligkeit"
+            items.append(Item("slider", label, "Helligkeit dieses Bildschirms in Prozent.",
+                              get=lambda d=dev: backlight_percent(d),
+                              set=lambda v, n=i + 1: run(["brightness", "set", str(n), str(v)]), lo=5, hi=100, step=5))
+        items.append(Item("slider", "Lautstärke", "Lautstärke des Lautsprechers und Kopfhörers.",
+                          get=lambda: int(self.setting("audio.volume", "50") or 50),
+                          set=lambda v: run(["volume", str(v)]), lo=0, hi=100, step=5))
+        return Page("Anzeige & Ton", items)
+
+    def page_drastic(self, game=None):
+        key = (lambda k: self.game_key(game, k)) if game else (lambda k: "nds." + k)
+        inherit = [("", "wie Voreinstellung")] if game else []
+        onoff = inherit + [("1", "an"), ("0", "aus")]
+
+        def getter(k, default):
+            return lambda: self.setting(key(k), "" if game else default)
+
+        def setter(k):
+            return lambda v: cfg_set(key(k), v if v != "" else None)
+        return Page(game.title if game else "DraStic", [
+            Item("choice", "Bildfilter", "nitro-sharp: scharf mit gleichmäßig dicken Linien. sharp-shimmerless: scharf, weiche Übergänge. bilinear: weich.",
+                 get=getter("shader", "nitro-sharp"), set=setter("shader"), choices=inherit + SHADERS),
+            Item("choice", "Hi-Res 3D", "3D in doppelter Auflösung. Auf dem RG DS meist zu langsam.",
+                 get=getter("hires_3d", "0"), set=setter("hires_3d"), choices=onoff),
+            Item("choice", "Threaded 3D", "3D-Berechnung auf einem eigenen Prozessorkern. Empfohlen: an.",
+                 get=getter("threaded_3d", "1"), set=setter("threaded_3d"), choices=onoff),
+        ], help="Gilt nur für dieses Spiel." if game else "Voreinstellung für alle Spiele.")
+
+    def page_network(self):
+        def service(setting, marker, units):
+            def get():
+                return self.setting(setting) == "1"
+
+            def set_(on):
+                cfg_set(setting, "1" if on else "0")
+                for u in units:
+                    run(["systemctl", "start" if on else "stop", u])
+                run(["systemctl", "enable" if on else "disable", units[0]])
+                run(["mkdir", "-p", os.path.dirname(marker)])
+                run(["touch", marker] if on else ["rm", "-f", marker])
+            return get, set_
+        ssh_get, ssh_set = service("ssh.enabled", "/storage/.cache/services/sshd.conf", ["sshd"])
+        smb_get, smb_set = service("samba.enabled", "/storage/.cache/services/smb.conf", ["smbd", "nmbd"])
+        return Page("Netzwerk", [
+            Item("info", "IP-Adresse", "Adresse im WLAN, z. B. für SSH oder die Freigabe \\\\<Adresse>\\roms.", get=ip_address),
+            Item("toggle", "SSH", "Zugriff per Terminal (Benutzer root).", get=ssh_get, set=ssh_set),
+            Item("toggle", "Samba-Freigabe", "ROMs und Spielstände im Netzwerk freigeben.", get=smb_get, set=smb_set),
+            Item("action", "WLAN einrichten (EmulationStation)", "Netzwerk auswählen und Passwort eingeben, oben in EmulationStation.", do=self.emulationstation),
+        ])
+
+    def page_info(self):
+        cap, charging = battery()
+        return Page("Info", [
+            Item("info", "Gerät", "", get=lambda: os.environ.get("QUIRK_DEVICE", "Anbernic RG DS")),
+            Item("info", "Version", "", get=lambda: f"{os_release('VERSION')}  ({os_release('BUILD_ID')[:7]})"),
+            Item("info", "Akku", "", get=lambda: f"{cap}%" + (" (lädt)" if charging else "") if cap is not None else "?"),
+            Item("info", "Speicher", "", get=lambda: free_space(str(ROMS))),
+            Item("info", "Laufzeit", "", get=uptime),
+            Item("info", "Spiele", "", get=lambda: str(len(self.games))),
+        ])
+
+    def ask(self, message, callback):
+        self.confirm = [message, callback, 1]
+        self.dirty = True
+
     # ---------- drawing primitives ----------
     def corner_tex(self, r):
         """Tiny white rounded square with anti-aliased corners; rounded rectangles of any
@@ -319,13 +532,35 @@ class Menu:
                         a = int(255 * min(1.0, max(0.0, r + 0.5 - math.hypot(cx + 0.5, cy + 0.5))))
                     i = (y * size + x) * 4
                     buf[i:i + 4] = b"\xff\xff\xff" + bytes((a,))
-            raw = (ctypes.c_uint8 * len(buf)).from_buffer(buf)
-            surf = sdl.CreateRGBSurfaceWithFormatFrom(raw, size, size, 32, size * 4, sdl.PIXELFORMAT_ABGR8888)
-            tex = sdl.CreateTextureFromSurface(self.renderer, surf)
-            sdl.FreeSurface(surf)
-            sdl.SetTextureBlendMode(tex, sdl.BLENDMODE_BLEND)
+            tex = self.texture_from(buf, size, size)
             self.shapes[r] = tex
         return tex
+
+    def texture_from(self, buf, w, h):
+        raw = (ctypes.c_uint8 * len(buf)).from_buffer(buf)
+        surf = sdl.CreateRGBSurfaceWithFormatFrom(raw, w, h, 32, w * 4, sdl.PIXELFORMAT_ABGR8888)
+        tex = sdl.CreateTextureFromSurface(self.renderer, surf)
+        sdl.FreeSurface(surf)
+        sdl.SetTextureBlendMode(tex, sdl.BLENDMODE_BLEND)
+        sdl.SetTextureScaleMode(tex, sdl.SCALEMODE_NEAREST)
+        return tex
+
+    def bitmap(self, name, rows):
+        tex = self.bitmaps.get(name)
+        if tex is None:
+            w, h = len(rows[0]), len(rows)
+            buf = bytearray()
+            for row in rows:
+                for ch in row:
+                    buf += b"\xff\xff\xff\xff" if ch == "#" else b"\0\0\0\0"
+            tex = self.bitmaps[name] = (self.texture_from(buf, w, h), w, h)
+        return tex
+
+    def draw_bitmap(self, name, rows, x, y, scale, color):
+        tex, w, h = self.bitmap(name, rows)
+        sdl.SetTextureColorMod(tex, color[0], color[1], color[2])
+        sdl.SetTextureAlphaMod(tex, 255)
+        sdl.RenderCopy(self.renderer, tex, None, sdl.Rect(int(x), int(y), w * scale, h * scale))
 
     def rect(self, x, y, w, h, color, r=0):
         x, y, w, h = int(x), int(y), int(w), int(h)
@@ -356,7 +591,7 @@ class Menu:
     def text(self, s, x, y, size=16, color=C_TEXT, bold=False, align="left", max_w=None):
         if not s:
             return 0, 0
-        key = (s, size, bold, color[:3], max_w)
+        key = (s, size, bold, max_w)
         entry = self.textures.get(key)
         if entry is None:
             f = self.font(size, bold)
@@ -377,7 +612,7 @@ class Menu:
             w, h = surf.contents.w, surf.contents.h
             sdl.FreeSurface(surf)
             sdl.SetTextureBlendMode(tex, sdl.BLENDMODE_BLEND)
-            if len(self.textures) > 300:
+            if len(self.textures) > 400:
                 for t in self.textures.values():
                     sdl.DestroyTexture(t[0])
                 self.textures.clear()
@@ -397,18 +632,19 @@ class Menu:
         sdl.TTF_SizeUTF8(f, s.encode(), ctypes.byref(w), ctypes.byref(h))
         return w.value, h.value
 
-    def line(self, x1, y1, x2, y2, color):
-        sdl.SetRenderDrawColor(self.renderer, color[0], color[1], color[2], color[3] if len(color) > 3 else 255)
-        sdl.RenderDrawLine(self.renderer, int(x1), int(y1), int(x2), int(y2))
-
-    # ---------- screens ----------
-    def draw(self):
-        sdl.SetRenderDrawColor(self.renderer, *C_TOP_BG, 255)
-        sdl.RenderClear(self.renderer)
-        self.draw_top()
-        self.draw_bottom()
-        sdl.RenderPresent(self.renderer)
-        self.dirty = False
+    def wrap(self, s, size, max_w, bold=False):
+        f = self.font(size, bold)
+        lines, cur = [], ""
+        for word in s.split():
+            trial = (cur + " " + word).strip()
+            if cur and f and self.measure(f, trial)[0] > max_w:
+                lines.append(cur)
+                cur = word
+            else:
+                cur = trial
+        if cur:
+            lines.append(cur)
+        return lines
 
     def stripes(self, x0, y0):
         key = (x0, y0)
@@ -420,15 +656,29 @@ class Menu:
         sdl.SetRenderDrawColor(self.renderer, *C_STRIPE)
         sdl.RenderFillRects(self.renderer, arr, len(arr))
 
-    def draw_top(self):
-        self.stripes(0, 44)
+    # ---------- screens ----------
+    def draw(self):
+        sdl.SetRenderDrawColor(self.renderer, *C_TOP_BG, 255)
+        sdl.RenderClear(self.renderer)
+        self.draw_top()
+        self.draw_bottom()
+        sdl.RenderPresent(self.renderer)
+        self.dirty = False
+
+    def draw_status_bar(self):
         self.rect(0, 0, SCREEN_W, 44, C_TOP_BAR)
         self.rect(0, 44, SCREEN_W, 2, C_BORDER)
         now = datetime.now()
         self.text(f"{DAYS[now.weekday()]}, {now.day}. {MONTHS[now.month - 1]}", 16, 12, 16, C_TEXT)
         self.text(now.strftime("%H:%M"), SCREEN_W // 2, 6, 32, C_TEXT, True, "center")
-        self.draw_battery(SCREEN_W - 16, 15)
+        self.draw_battery(SCREEN_W - 16, 15, C_TOP_BAR)
 
+    def draw_top(self):
+        self.stripes(0, 44)
+        self.draw_status_bar()
+        if self.pages or self.confirm:
+            self.draw_help()
+            return
         if not self.games:
             self.text("Keine Spiele gefunden", SCREEN_W // 2, 190, 32, C_TEXT, True, "center")
             self.text("ROMs nach roms/nds kopieren und neu starten", SCREEN_W // 2, 240, 16, C_TEXT_DIM, False, "center")
@@ -443,9 +693,7 @@ class Menu:
         if tex:
             sdl.RenderCopy(self.renderer, tex, None, sdl.Rect(ix, iy, 128, 128))
         tx = ix + 160
-        name, sub = g.name, ""
-        if " - " in name:
-            name, sub = name.split(" - ", 1)
+        name, sub = (g.name.split(" - ", 1) + [""])[:2]
         self.text(name, tx, iy + 2, 32, C_TEXT, True, max_w=bw - 200)
         self.text(sub, tx, iy + 44, 16, C_TEXT, max_w=bw - 200)
         self.text(g.publisher, tx, iy + 72, 16, C_TEXT_DIM, max_w=bw - 200)
@@ -454,6 +702,24 @@ class Menu:
         self.draw_dots(SCREEN_W // 2, by + bh + 26)
         self.text("<  >  Auswahl      A  Start      SELECT  Einstellungen", SCREEN_W // 2, SCREEN_H - 36, 16, C_TEXT_DIM, False, "center")
 
+    def draw_help(self):
+        bx, by, bw, bh = 60, 92, 520, 216
+        self.rect(bx + 4, by + 6, bw, bh, C_SHADOW, 16)
+        self.box(bx, by, bw, bh, C_WHITE, C_BORDER, 2, 16)
+        if self.confirm:
+            title, help = "Bitte bestätigen", self.confirm[0]
+        else:
+            page = self.pages[-1]
+            title = page.title
+            item = page.items[page.cursor] if page.items else None
+            help = (item.help if item and item.help else page.help) or ""
+        self.text(title, bx + 24, by + 24, 32, C_TEXT, True, max_w=bw - 48)
+        y = by + 80
+        for line in self.wrap(help, 16, bw - 48)[:5]:
+            self.text(line, bx + 24, y, 16, C_TEXT)
+            y += 24
+        self.text("A  Wählen      B  Zurück      <  >  Ändern", SCREEN_W // 2, SCREEN_H - 36, 16, C_TEXT_DIM, False, "center")
+
     def draw_dots(self, cx, cy):
         n = len(self.games)
         if n <= 1:
@@ -461,27 +727,27 @@ class Menu:
         if n <= 24:
             x0 = cx - (n - 1) * 7
             for i in range(n):
-                c = C_SELECT if i == self.sel else C_BORDER
-                self.rect(x0 + i * 14 - 3, cy - 3, 6, 6, c, 3)
+                self.rect(x0 + i * 14 - 3, cy - 3, 6, 6, C_SELECT if i == self.sel else C_BORDER, 3)
         else:
             w = 300
             self.rect(cx - w // 2, cy - 2, w, 4, C_BORDER, 2)
             self.rect(cx - w // 2 + int((w - 24) * self.sel / (n - 1)), cy - 4, 24, 8, C_SELECT, 4)
 
-    def draw_battery(self, right, y):
+    def draw_battery(self, right, y, bg, scale=1):
         cap, charging = battery()
-        w, h = 30, 14
-        x = right - w
+        w, h = 30 * scale, 14 * scale
+        x = right - w - 3 * scale
+        label = (f"{cap}%" if cap is not None else "") + ("  lädt" if charging else "")
+        if label:
+            self.text(label, x - 8 * scale, y - 2 * scale, 16 * scale, C_GREEN if charging else C_TEXT, charging, "right")
+        self.rect(x, y, w, h, C_TEXT, 3 * scale)
+        self.rect(x + 2 * scale, y + 2 * scale, w - 4 * scale, h - 4 * scale, bg, 2 * scale)
+        self.rect(x + w, y + 4 * scale, 3 * scale, h - 8 * scale, C_TEXT, scale)
         if cap is not None:
-            self.text(f"{cap}%", x - 8, y - 2, 16, C_TEXT, align="right")
-        self.rect(x, y, w, h, C_TEXT, 3)
-        self.rect(x + 2, y + 2, w - 4, h - 4, C_TOP_BAR, 2)
-        self.rect(x + w, y + 4, 3, h - 8, C_TEXT, 1)
-        if cap is not None:
-            c = C_GREEN if cap > 40 else C_ORANGE if cap > 15 else C_RED
-            self.rect(x + 3, y + 3, max(1, int((w - 6) * cap / 100)), h - 6, c, 1)
+            c = C_GREEN if charging or cap > 40 else C_ORANGE if cap > 15 else C_RED
+            self.rect(x + 3 * scale, y + 3 * scale, max(1, int((w - 6 * scale) * cap / 100)), h - 6 * scale, c, scale)
         if charging:
-            self.text("+", x + w // 2, y - 4, 16, C_TEXT, True, "center")
+            self.draw_bitmap("bolt", BOLT, x + w // 2 - 7 * scale, y - 1 * scale, 2 * scale, C_TEXT)
 
     def card_geometry(self, i):
         d = i - self.pos
@@ -499,7 +765,15 @@ class Menu:
         self.stripes(ox, 8)
         if self.child:
             self.draw_child_panel()
-            return
+        elif self.confirm:
+            self.draw_confirm()
+        elif self.pages:
+            self.draw_page(self.pages[-1])
+        else:
+            self.draw_shelf()
+
+    def draw_shelf(self):
+        ox = SCREEN_W
         n = len(self.games)
         if n:
             self.text(f"{self.sel + 1} / {n}", ox + SCREEN_W - 16, 12, 16, C_TEXT_DIM, align="right")
@@ -534,10 +808,14 @@ class Menu:
         else:
             self.rect(ix, iy, isz, isz, (*C_CARD_NOTCH, alpha), 6)
         if selected:
-            self.draw_pill(x + w // 2 - 60, y + h + 12, 120, 36, "Start", "start", True)
+            cx = x + w // 2
+            self.draw_pill(cx - 134, y + h + 12, 150, 36, "Start", "start", True)
+            self.draw_pill(cx + 24, y + h + 12, 110, 36, "Optionen", "options")
 
     def draw_child_panel(self):
-        """Bottom screen while EmulationStation or a game runs on the top screen."""
+        """Bottom screen while EmulationStation or a game runs on the top screen. DraStic
+        shrinks to the top screen while its own menu is open, so this doubles as an info
+        panel with the brightness control there."""
         ox = SCREEN_W
         cx = ox + SCREEN_W // 2
         bx, by, bw, bh = ox + 60, 70, SCREEN_W - 120, 260
@@ -548,9 +826,72 @@ class Menu:
             self.text("EmulationStation ist auf dem oberen Bildschirm geöffnet.", cx, by + 84, 16, C_TEXT, False, "center", bw - 40)
             self.text("Dort öffnet START das Hauptmenü.", cx, by + 110, 16, C_TEXT_DIM, False, "center", bw - 40)
             self.draw_pill(cx - 150, by + bh - 84, 300, 56, "Zurück zum DS-Menü", "back", True)
-        else:
-            self.text(self.child_label, cx, by + 60, 32, C_TEXT, True, "center", bw - 40)
-            self.text("Das Spiel läuft auf beiden Bildschirmen.", cx, by + 120, 16, C_TEXT_DIM, False, "center", bw - 40)
+            return
+        self.text(self.child_label, cx, by + 22, 32, C_TEXT, True, "center", bw - 40)
+        self.text(datetime.now().strftime("%H:%M"), bx + 40, by + 80, 32, C_TEXT, True)
+        self.draw_battery(bx + bw - 40, by + 86, C_WHITE, 2)
+        devs = backlights()
+        if devs:
+            self.text("Helligkeit", bx + 40, by + 168, 16, C_TEXT_DIM)
+            self.draw_slider(bx + 160, by + 166, bw - 200, backlight_percent(devs[-1]), 5, 100, False)
+
+    def draw_confirm(self):
+        ox = SCREEN_W
+        cx = ox + SCREEN_W // 2
+        bx, by, bw, bh = ox + 60, 110, SCREEN_W - 120, 220
+        self.rect(bx + 4, by + 6, bw, bh, C_SHADOW, 16)
+        self.box(bx, by, bw, bh, C_WHITE, C_BORDER, 2, 16)
+        self.text(self.confirm[0], cx, by + 40, 32, C_TEXT, True, "center", bw - 40)
+        for k, (label, dx) in enumerate((("Ja", -170), ("Nein", 10))):
+            self.draw_pill(cx + dx, by + bh - 90, 160, 56, label, "confirm", self.confirm[2] == k)
+
+    def draw_page(self, page):
+        ox = SCREEN_W
+        self.draw_pill(ox + 16, 10, 120, 44, "Zurück", "back")
+        self.text(page.title, ox + SCREEN_W // 2 + 30, 14, 32, C_TEXT, True, "center", SCREEN_W - 200)
+        if page.cursor < page.scroll:
+            page.scroll = page.cursor
+        if page.cursor >= page.scroll + ROWS:
+            page.scroll = page.cursor - ROWS + 1
+        for k, item in enumerate(page.items[page.scroll:page.scroll + ROWS]):
+            i = page.scroll + k
+            y = ROW_Y0 + k * ROW_H
+            x, w, h = ox + 16, SCREEN_W - 32, ROW_H - 8
+            selected = i == page.cursor
+            self.box(x, y, w, h, C_WHITE, C_SELECT if selected else C_BORDER, 3 if selected else 2, 10)
+            color = C_RED if item.danger else C_TEXT
+            self.text(item.label, x + 16, y + h // 2 - 8, 16, color, selected, max_w=w - 40 if item.kind in ("action", "submenu") else w - 260)
+            right = x + w - 16
+            if item.kind == "toggle":
+                self.draw_switch(right - 52, y + h // 2 - 13, bool(item.get()))
+            elif item.kind == "choice":
+                value = item.get()
+                label = next((l for v, l in item.choices if v == value), value or "?")
+                self.text(f"<  {label}  >", right, y + h // 2 - 8, 16, C_SELECT if selected else C_TEXT, align="right")
+            elif item.kind == "slider":
+                v = item.get()
+                self.text(f"{v} %", right - 196, y + h // 2 - 8, 16, C_TEXT, align="right")
+                self.draw_slider(right - 180, y + h // 2 - 4, 180, v, item.lo, item.hi, selected)
+            elif item.kind == "info":
+                self.text(str(item.get()), right, y + h // 2 - 8, 16, C_TEXT_DIM, align="right", max_w=w - 160)
+            elif item.kind == "submenu":
+                self.text(">", right, y + h // 2 - 8, 16, C_TEXT_DIM, True, "right")
+        if len(page.items) > ROWS:
+            th = (SCREEN_H - 120) * ROWS // len(page.items)
+            ty = ROW_Y0 + (SCREEN_H - 120 - th) * page.scroll // max(1, len(page.items) - ROWS)
+            self.rect(ox + SCREEN_W - 10, ROW_Y0, 4, SCREEN_H - 120, C_TRACK, 2)
+            self.rect(ox + SCREEN_W - 10, ty, 4, th, C_SELECT, 2)
+
+    def draw_switch(self, x, y, on):
+        self.rect(x, y, 52, 26, C_SELECT if on else C_TRACK, 13)
+        self.rect(x + (28 if on else 2), y + 2, 22, 22, C_WHITE, 11)
+
+    def draw_slider(self, x, y, w, value, lo, hi, selected):
+        self.rect(x, y, w, 8, C_TRACK, 4)
+        f = (value - lo) / max(1, hi - lo)
+        self.rect(x, y, max(8, int(w * f)), 8, C_SELECT, 4)
+        kx = x + int((w - 20) * f)
+        self.box(kx, y - 6, 20, 20, C_WHITE, C_SELECT if selected else C_BORDER, 2, 10)
 
     def draw_pill(self, x, y, w, h, label, kind, primary=False):
         self.rect(x + 2, y + 3, w, h, C_SHADOW, h // 2)
@@ -562,9 +903,13 @@ class Menu:
         elif kind == "sleep":
             self.draw_moon_icon(x + 24, y + h // 2, color)
             self.text(label, x + 52, y + h // 2 - 8, 16, color)
-        elif kind == "back":
+        elif kind == "back" and h > 44:
             self.text(label, x + w // 2, y + h // 2 - 16, 32, color, True, "center")
-        else:
+        elif kind == "back":
+            self.text("<  " + label, x + w // 2, y + h // 2 - 8, 16, color, True, "center")
+        elif kind == "confirm":
+            self.text(label, x + w // 2, y + h // 2 - 16, 32, color, True, "center")
+        elif label:
             self.text(label, x + w // 2, y + h // 2 - 8, 16, color, True, "center")
 
     def draw_sliders_icon(self, cx, cy, color):
@@ -577,7 +922,7 @@ class Menu:
         self.rect(cx - 8, cy - 8, 16, 16, color, 8)
         self.rect(cx - 2, cy - 10, 16, 16, C_WHITE, 8)
 
-    # ---------- input ----------
+    # ---------- shelf input ----------
     def select(self, i, animate=True):
         n = len(self.games)
         if not n:
@@ -595,7 +940,13 @@ class Menu:
         self.dirty = True
 
     def move(self, delta):
-        self.select(self.sel + delta)
+        if self.confirm:
+            self.confirm[2] = 0 if delta < 0 else 1
+            self.dirty = True
+        elif self.pages:
+            self.adjust(self.pages[-1], delta)
+        else:
+            self.select(self.sel + delta)
 
     def press_direction(self, direction):
         if direction == self.held:
@@ -608,15 +959,61 @@ class Menu:
     def tick_repeat(self):
         if self.held and time.monotonic() >= self.next_repeat:
             self.move(self.held)
-            self.next_repeat = time.monotonic() + 0.09
+            self.next_repeat = time.monotonic() + (0.15 if self.pages else 0.09)
 
+    # ---------- settings input ----------
+    def page_up_down(self, delta):
+        page = self.pages[-1]
+        if page.items:
+            page.cursor = max(0, min(len(page.items) - 1, page.cursor + delta))
+            self.dirty = True
+
+    def adjust(self, page, delta):
+        if not page.items:
+            return
+        item = page.items[page.cursor]
+        if item.kind == "slider":
+            item.set(max(item.lo, min(item.hi, item.get() + delta * item.step)))
+        elif item.kind == "choice":
+            values = [v for v, _ in item.choices]
+            cur = item.get()
+            k = values.index(cur) if cur in values else 0
+            item.set(values[(k + delta) % len(values)])
+        elif item.kind == "toggle":
+            item.set(not item.get())
+        else:
+            return
+        self.dirty = True
+
+    def activate(self, page):
+        if not page.items:
+            return
+        item = page.items[page.cursor]
+        if item.kind in ("action", "submenu"):
+            item.do()
+        elif item.kind in ("toggle", "choice"):
+            self.adjust(page, 1)
+        self.dirty = True
+
+    def back(self):
+        if self.confirm:
+            self.confirm = None
+        elif self.pages:
+            self.pages.pop()
+        self.slider_drag = None
+        self.dirty = True
+
+    # ---------- events ----------
     def handle_event(self, ev):
         t = ev.type
         if t == sdl.EVENT_QUIT:
             self.quit = True
         elif t == sdl.EVENT_WINDOWEVENT:
             self.dirty = True
-        elif self.child and t not in (sdl.EVENT_FINGERDOWN, sdl.EVENT_FINGERUP, sdl.EVENT_FINGERMOTION):
+        elif t in (sdl.EVENT_FINGERDOWN, sdl.EVENT_FINGERUP, sdl.EVENT_FINGERMOTION):
+            e = ctypes.cast(ctypes.byref(ev), ctypes.POINTER(sdl.TouchFingerEvent)).contents
+            self.finger(t, e.x * WIN_W, e.y * WIN_H)
+        elif self.child:
             return  # the pad belongs to the game or EmulationStation now
         elif t == sdl.EVENT_CONTROLLERDEVICEADDED:
             self.open_controller(ctypes.cast(ctypes.byref(ev), ctypes.POINTER(sdl.DeviceEvent)).contents.which)
@@ -637,17 +1034,9 @@ class Menu:
         elif t == sdl.EVENT_JOYHATMOTION and not self.controllers:
             e = ctypes.cast(ctypes.byref(ev), ctypes.POINTER(sdl.JoyHatEvent)).contents
             self.press_direction(1 if e.value & sdl.HAT_RIGHT else -1 if e.value & sdl.HAT_LEFT else 0)
-        elif t == sdl.EVENT_JOYBUTTONDOWN and not self.controllers:
-            e = ctypes.cast(ctypes.byref(ev), ctypes.POINTER(sdl.JoyButtonEvent)).contents
-            print("joystick button", e.button, file=sys.stderr)
-            if e.button in (0, 1):
-                self.start_game()
         elif t in (sdl.EVENT_KEYDOWN, sdl.EVENT_KEYUP):
             e = ctypes.cast(ctypes.byref(ev), ctypes.POINTER(sdl.KeyboardEvent)).contents
             self.key(e.sym, t == sdl.EVENT_KEYDOWN, e.repeat)
-        elif t in (sdl.EVENT_FINGERDOWN, sdl.EVENT_FINGERUP, sdl.EVENT_FINGERMOTION):
-            e = ctypes.cast(ctypes.byref(ev), ctypes.POINTER(sdl.TouchFingerEvent)).contents
-            self.finger(t, e.x * WIN_W, e.y * WIN_H)
 
     def button(self, b, down):
         B = sdl
@@ -656,14 +1045,22 @@ class Menu:
             self.press_direction(d if down else (0 if self.held == d else self.held))
         elif not down:
             return
+        elif b in (B.CONTROLLER_BUTTON_DPAD_UP, B.CONTROLLER_BUTTON_DPAD_DOWN):
+            if self.pages and not self.confirm:
+                self.page_up_down(-1 if b == B.CONTROLLER_BUTTON_DPAD_UP else 1)
         # Nintendo layout: SDL's "B" (east) is the button labelled A on the RG DS
         elif b in (B.CONTROLLER_BUTTON_B, B.CONTROLLER_BUTTON_START):
-            self.start_game()
+            self.primary()
+        elif b == B.CONTROLLER_BUTTON_A:
+            self.back()
         elif b == B.CONTROLLER_BUTTON_BACK:
-            self.settings()
-        elif b == B.CONTROLLER_BUTTON_LEFTSHOULDER:
+            if self.pages or self.confirm:
+                self.back()
+            else:
+                self.open_page("settings")
+        elif b == B.CONTROLLER_BUTTON_LEFTSHOULDER and not self.pages:
             self.move(-5)
-        elif b == B.CONTROLLER_BUTTON_RIGHTSHOULDER:
+        elif b == B.CONTROLLER_BUTTON_RIGHTSHOULDER and not self.pages:
             self.move(5)
 
     def key(self, sym, down, repeat):
@@ -673,25 +1070,52 @@ class Menu:
                 self.press_direction(d if down else (0 if self.held == d else self.held))
         elif not down or repeat:
             return
+        elif sym in (sdl.KEY_UP, sdl.KEY_DOWN):
+            if self.pages and not self.confirm:
+                self.page_up_down(-1 if sym == sdl.KEY_UP else 1)
         elif sym in (sdl.KEY_RETURN, sdl.KEY_SPACE):
-            self.start_game()
-        elif sym == sdl.KEY_PAGEUP:
-            self.move(-5)
-        elif sym == sdl.KEY_PAGEDOWN:
-            self.move(5)
+            self.primary()
+        elif sym == sdl.KEY_BACKSPACE:
+            self.back()
         elif sym == sdl.KEY_ESCAPE:
-            self.settings()
+            if self.pages or self.confirm:
+                self.back()
+            else:
+                self.open_page("settings")
+        elif sym == sdl.KEY_PAGEUP and not self.pages:
+            self.move(-5)
+        elif sym == sdl.KEY_PAGEDOWN and not self.pages:
+            self.move(5)
         elif sym == ord("q"):
             self.quit = True
+
+    def primary(self):
+        if self.confirm:
+            message, callback, cursor = self.confirm
+            self.confirm = None
+            self.dirty = True
+            if cursor == 0:
+                callback()
+        elif self.pages:
+            self.activate(self.pages[-1])
+        else:
+            self.start_game()
 
     def finger(self, t, x, y):
         now = time.monotonic()
         if self.touch_log < 12:
             self.touch_log += 1
             print(f"touch {t:#x} {x:.0f},{y:.0f}", file=sys.stderr)
-        if self.child:
-            if t == sdl.EVENT_FINGERUP:
-                self.tap(x, y)
+        if self.child or self.pages or self.confirm:
+            if t == sdl.EVENT_FINGERDOWN:
+                self.slider_down(x, y)
+            elif t == sdl.EVENT_FINGERMOTION:
+                self.slider_motion(x)
+            elif t == sdl.EVENT_FINGERUP:
+                if self.slider_drag:
+                    self.slider_drag = None
+                else:
+                    self.tap(x, y)
             return
         if t == sdl.EVENT_FINGERDOWN:
             self.drag = [x, self.pos, False, [(now, x)]]
@@ -703,7 +1127,7 @@ class Menu:
         if t == sdl.EVENT_FINGERMOTION:
             if abs(x - x0) > 8:
                 self.drag[2] = moved = True
-            if moved and self.games and y > 60 and y < SCREEN_H - 90:
+            if moved and self.games and 60 < y < SCREEN_H - 90:
                 n = len(self.games)
                 self.pos = max(-0.4, min(n - 0.6, pos0 - (x - x0) / STEP))
                 self.sel = max(0, min(n - 1, int(round(self.pos))))
@@ -723,17 +1147,81 @@ class Menu:
             return
         self.tap(x, y)
 
+    def slider_rects(self):
+        """(item, x, y, w, h[, row]) of the sliders currently on screen, for touch."""
+        ox = SCREEN_W
+        if self.child and self.child_kind == "game":
+            devs = backlights()
+            if devs:
+                item = Item("slider", "", get=lambda: backlight_percent(devs[-1]),
+                            set=lambda v: run(["brightness", "set", str(len(devs)), str(v)]), lo=5, hi=100)
+                return [(item, ox + 60 + 160, 70 + 166 - 14, SCREEN_W - 120 - 200, 36)]
+            return []
+        if self.pages and not self.confirm:
+            page = self.pages[-1]
+            out = []
+            for k, item in enumerate(page.items[page.scroll:page.scroll + ROWS]):
+                if item.kind == "slider":
+                    y = ROW_Y0 + k * ROW_H
+                    out.append((item, ox + 16 + SCREEN_W - 32 - 16 - 180, y, 180, ROW_H - 8, page.scroll + k))
+            return out
+        return []
+
+    def slider_down(self, x, y):
+        for entry in self.slider_rects():
+            item, sx, sy, sw, sh = entry[:5]
+            if sx - 12 <= x <= sx + sw + 12 and sy <= y <= sy + sh:
+                self.slider_drag = (item, sx, sw)
+                if len(entry) > 5 and self.pages:
+                    self.pages[-1].cursor = entry[5]
+                self.slider_motion(x)
+                return
+
+    def slider_motion(self, x):
+        if not self.slider_drag:
+            return
+        item, sx, sw = self.slider_drag
+        f = max(0.0, min(1.0, (x - sx) / sw))
+        v = item.lo + round((item.hi - item.lo) * f / item.step) * item.step
+        if v != item.get():
+            item.set(int(v))
+            self.dirty = True
+
     def tap(self, x, y):
         ox = SCREEN_W
         if x < ox:
             return
+        cx = ox + SCREEN_W // 2
         if self.child:
-            cx = ox + SCREEN_W // 2
             if self.child_kind == "settings" and cx - 150 <= x <= cx + 150 and 246 <= y <= 302:
                 self.end_child()
             return
+        if self.confirm:
+            if 240 <= y <= 296:
+                if cx - 170 <= x <= cx - 10:
+                    self.confirm[2] = 0
+                    self.primary()
+                elif cx + 10 <= x <= cx + 170:
+                    self.back()
+            return
+        if self.pages:
+            page = self.pages[-1]
+            if 10 <= y <= 54 and ox + 16 <= x <= ox + 136:
+                self.back()
+                return
+            for k, item in enumerate(page.items[page.scroll:page.scroll + ROWS]):
+                ry = ROW_Y0 + k * ROW_H
+                if ry <= y <= ry + ROW_H - 8:
+                    page.cursor = page.scroll + k
+                    if item.kind == "choice":
+                        self.adjust(page, 1 if x > ox + SCREEN_W // 2 else -1)
+                    elif item.kind != "slider":
+                        self.activate(page)
+                    self.dirty = True
+                    return
+            return
         if ox + 24 <= x <= ox + 224 and SCREEN_H - 72 <= y <= SCREEN_H - 24:
-            self.settings()
+            self.open_page("settings")
             return
         if ox + SCREEN_W - 224 <= x <= ox + SCREEN_W - 24 and SCREEN_H - 72 <= y <= SCREEN_H - 24:
             self.sleep()
@@ -741,9 +1229,15 @@ class Menu:
         if not self.games:
             return
         for i in range(max(0, self.sel - 3), min(len(self.games), self.sel + 4)):
-            d, cx, cy, w, h, _ = self.card_geometry(i)
-            extra = 52 if i == self.sel else 0
-            if cx <= x <= cx + w and cy <= y <= cy + h + extra:
+            d, cxx, cy, w, h, _ = self.card_geometry(i)
+            if i == self.sel and abs(d) < 0.5 and cy + h + 12 <= y <= cy + h + 48:
+                mid = cxx + w // 2
+                if mid - 134 <= x <= mid + 16:
+                    self.start_game()
+                elif mid + 24 <= x <= mid + 134:
+                    self.open_page("drastic", self.games[i])
+                return
+            if cxx <= x <= cxx + w and cy <= y <= cy + h:
                 if i == self.sel and abs(d) < 0.5:
                     self.start_game()
                 else:
@@ -772,10 +1266,10 @@ class Menu:
         if not self.games or self.animating:
             return
         g = self.games[self.sel]
-        self.launch("game", f"{g.name.split(' - ')[0]} läuft …",
-                    ["/usr/bin/runemu.sh", g.path, "-Pnds", "--core=drastic-sa", "--emulator=drastic"], {"NDS_MENU": "1"})
+        self.launch("game", g.title, ["/usr/bin/runemu.sh", g.path, "-Pnds", "--core=drastic-sa", "--emulator=drastic"], {"NDS_MENU": "1"})
 
-    def settings(self):
+    def emulationstation(self):
+        self.pages.clear()
         self.launch("settings", "Einstellungen",
                     ["bash", "-c", ". /usr/bin/es_settings; exec emulationstation --log-path /var/log --no-splash"])
 
@@ -786,7 +1280,7 @@ class Menu:
             self.child_seen = -time.monotonic()
 
     def tick_child(self):
-        if not self.child:
+        if not self.child or self.child is True:
             return
         now = time.monotonic()
         if self.child.poll() is not None:
@@ -800,8 +1294,8 @@ class Menu:
         if self.child_seen < 0 and now + self.child_seen > 8:
             self.child.kill()
         elif self.bottom_restore:
-            # sway's EmulationStation rules switch the bottom screen off once its window
-            # appears; put it back on for the panel a moment later
+            # sway's EmulationStation rules may switch the bottom screen off once its
+            # window appears; put it back on for the panel a moment later
             if not self.child_seen and window_rect("emulationstation"):
                 self.child_seen = now
             elif self.child_seen and now - self.child_seen > 1.5:
@@ -812,7 +1306,7 @@ class Menu:
                 self.dirty = True
 
     def sleep(self):
-        subprocess.run(["systemctl", "suspend"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        run(["systemctl", "suspend"])
         self.dirty = True
 
     # ---------- main loop ----------
@@ -842,6 +1336,8 @@ class Menu:
                         self.reload_games()
                 except OSError:
                     pass
+                if self.child and self.child_kind == "game":
+                    self.dirty = True   # battery and clock on the info panel
             m = datetime.now().minute
             if m != minute:
                 minute = m
