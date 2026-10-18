@@ -305,3 +305,15 @@ Hinweis: Defaults in `system.cfg` greifen nur bei frischem `/storage` (Neu-Flash
 
 ### nitro-sharp (Nachfolger von area-sharp)
 Nutzer bemerkte kleine Kerben im Text (z. B. oben im T): Am Ansatz eines Stamms ist der Querbalken senkrecht nicht mehr „1 px dünn“, die Regel blieb unentschieden → halbtransparenter Pixel. `nitro-sharp` übernimmt in genau diesem Fall die Entscheidung der parallelen Nachbarkante (Nachbarzeilen bzw. -spalten im Quellbild); nur bei Einigkeit. Simulator: GPU = CPU-Referenz (±1), ~20 % weniger Mischpixel im Testtext, Kerben an Abzweigungen weg (`docs/nitro-sharp-vs-area-sharp.png`). `area-sharp` bleibt als Alias im Hook. Name: „Nitro“ = DS-Codename (NTR).
+
+### nitro-sharp v4: Zwei-Pass-Aufbau (2026-10-18, nach Performance-Beschwerde)
+**Befund:** v2/v3 (Einpass) waren auf dem Mali-G52 in 3D-/Dither-Szenen zu langsam. Ursachen:
+1. Einpass muss pro Mischzeile die horizontale Mischung von **vier** Quellzeilen berechnen (bis 16 abhängige Fetches, tief verzweigt); mit 8er-Warps zahlt fast jede Gruppe den teuersten Pfad.
+2. v3-Bedingung für die Nachbar-Abfrage (`la == br && …`) griff in 3D (keine zwei gleichen Farben) auf **jedem** Mischpixel → nochmals 16 Fetches.
+
+**Lösung:** separabel. Pass 1: Quelle → Zwischentextur (Ausgabebreite × Quellzeilen, RGBA8, NEAREST, FBO), horizontale Regel inkl. Kreuzungs-Konsens über die Nachbar**zeilen**. Pass 2: Zwischentextur → Bildschirm, vertikale Regel, Konsens über die Nachbar**spalten** (reine Spalten per `pure_col(c) = ceil(c·s)`, benötigt `u_source_size`). Konsens nur bei „beide Seiten breit“ (`la && br`), alles andere mischt 50/50 (sicher gegen Dither-Flimmern).
+Kosten pro Bildschirm (geschätzt): Pass 1 ≈ 123k px × 4 Fetches, Pass 2 ≈ 307k × ~2,7 → ≈ 1,3 M Texel statt ≈ 2,7 M (area-sharp) bzw. ≈ 4,6 M (v3 in 3D); flache Abhängigkeitsketten, zwei Zwischentexturen (Ping-Pong für beide Screens).
+Hook: `alloc_pass_targets()`, Probe 64×64 bei Init (Fallback sharp-shimmerless), FBO-/Textur-Binding gesichert, Filter der DS-Textur vor Pass 2 restauriert, Destruktor nur mit GL-Kontext. **SWIZ nur in Pass 1** (Zwischentextur ist bereits in Ausgabereihenfolge; Doppel-Swizzle war der erste Fehler im PC-Test).
+Erkenntnis SDL: Der GLES2-Renderer lädt ARGB8888 byteweise als `GL_RGBA` und swizzelt im eigenen Shader (`SDL_render_gles2.c`, `GLES2_IMAGESOURCE_TEXTURE_ARGB`) – das `.bgra` des Hooks ist daher treiberunabhängig korrekt, solange DraStic ARGB8888 nutzt.
+
+**Verifikation PC:** `rgds/sim/run.sh` (GPU = zweistufige CPU-Referenz ±1, GLES2 = Desktop-GL, Hi-Res ±2 wegen Doppelrundung) und neu `rgds/sim/hooktest.sh`: baut SDL2 2.30.9 (offscreen+GLES2) lokal, lädt `libGLESv2` aus dem Ubuntu-Paket, führt `libdrastouch.so` per `LD_PRELOAD` in einem DraStic-ähnlichen Programm (`hooktest.c`, zwei 256×192-Streaming-Texturen, mehrere Frames) aus und vergleicht die Fensterpixel mit dem Simulator → **bitgenau** für nitro-sharp und sharp-shimmerless (640×480 und 384×288).

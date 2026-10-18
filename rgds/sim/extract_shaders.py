@@ -2,7 +2,7 @@
 """Copy the GLSL string constants (VERT_SRC, FRAG_*) out of libdrastouch.c into shaders.h."""
 import re, sys
 src = open(sys.argv[1]).read()
-pat = re.compile(r'static const char \*((?:VERT|FRAG)_\w+)\s*=\s*((?:\s*"(?:[^"\\]|\\.)*")+)\s*;')
+pat = re.compile(r'static const char \*((?:VERT|FRAG|NITRO)_\w+)\s*=\s*((?:\s*"(?:[^"\\]|\\.)*")+)\s*;')
 out = []
 names = []
 for name, lit in pat.findall(src):

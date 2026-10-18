@@ -1,64 +1,39 @@
-// CPU reference for the 2->5 area / nitro-sharp scaler (handoff notes), RGB888 in/out.
-// Works in fixed point (horizontal blends x2, vertical x4) and rounds once at the end,
-// so colour comparisons are exact like the shader's.
+// CPU reference for the 2->5 area / nitro-sharp scaler, RGB888 in/out, in the shader's two
+// passes: rows are scaled to the output width and rounded to 8 bit, then the columns.
 // usage: ref <0|1 sharp> in.ppm out.ppm   (in: W x H, out: 2.5W x 2.5H)
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
-typedef struct { int c[3]; } px;
+typedef struct { unsigned char c[3]; } px;
 
-static int W, H;
-static px *S;   /* source, scaled x2 so it compares with horizontally scaled values */
+static int W, H, OW;
+static px *S, *M;   /* source, horizontally scaled rows (OW x H) */
 
-static px src(int x, int y) {
-    x = x < 0 ? 0 : x >= W ? W - 1 : x;
-    y = y < 0 ? 0 : y >= H ? H - 1 : y;
-    return S[y * W + x];
-}
+static int clampi(int v, int hi) { return v < 0 ? 0 : v > hi ? hi : v; }
+static px src(int x, int y) { return S[clampi(y, H - 1) * W + clampi(x, W - 1)]; }
+static px mid(int x, int y) { return M[clampi(y, H - 1) * OW + clampi(x, OW - 1)]; }
 static int eq(px a, px b) { return !memcmp(&a, &b, sizeof a); }
 
-/* 2: b takes the blended pixel, 0: a does, 1: undecided */
-static int side(px l, px a, px b, px r) {
-    int la = eq(l, a), br = eq(b, r);
-    if (la && !br) return 2;
-    if (br && !la) return 0;
-    return 1;
-}
+/* 2: b takes the blended pixel, 0: a does, 1: 50/50 */
 static int vote(px nl, px na, px nb, px nr, px a, px b) {
-    if (eq(na, nb)) return 0;
-    int s = side(nl, na, nb, nr);
-    if (s == 1) return 0;
-    px c = s ? nb : na;
+    int la = eq(nl, na), br = eq(nb, nr);
+    if (la == br || eq(na, nb)) return 0;
+    px c = la ? nb : na;
     return eq(c, b) ? 1 : eq(c, a) ? -1 : 0;
 }
-static int agree(int v0, int v1) {
-    int hi = v0 > v1 ? v0 : v1, lo = v0 < v1 ? v0 : v1;
-    if (hi > 0 && lo >= 0) return 2;
-    if (lo < 0 && hi <= 0) return 0;
-    return 1;
+static int agree(int v0, int v1, int w) {
+    int lo = v0 < v1 ? v0 : v1, hi = v0 > v1 ? v0 : v1;
+    if (v0 + v1 > 0 && lo >= 0) return 2;
+    if (v0 + v1 < 0 && hi <= 0) return 0;
+    return w;
 }
-static px blend(px a, px b, int s) { /* result x2 relative to inputs */
+static px blend(px a, px b, int w) {
     px o;
-    for (int k = 0; k < 3; k++) o.c[k] = s == 2 ? 2 * b.c[k] : s == 0 ? 2 * a.c[k] : a.c[k] + b.c[k];
+    for (int k = 0; k < 3; k++) o.c[k] = w == 2 ? b.c[k] : w == 0 ? a.c[k] : (a.c[k] + b.c[k] + 1) >> 1;
     return o;
 }
-
-static void hrow(int y, px *d, int sharp) { /* w -> 2.5w, values x2 (x4 vs. original) */
-    for (int x = 0; x < W; x += 2, d += 5) {
-        px A = src(x, y), B = src(x + 1, y);
-        int s = 1;
-        if (sharp && !eq(A, B)) {
-            px L = src(x - 1, y), R = src(x + 2, y);
-            int la = eq(L, A), br = eq(B, R);
-            s = la != br ? (la ? 2 : 0) : 1;
-            if (la == br && (la || !eq(L, B) || !eq(A, R)))
-                s = agree(vote(src(x - 1, y - 1), src(x, y - 1), src(x + 1, y - 1), src(x + 2, y - 1), A, B),
-                          vote(src(x - 1, y + 1), src(x, y + 1), src(x + 1, y + 1), src(x + 2, y + 1), A, B));
-        }
-        d[0] = d[1] = blend(A, A, 1); d[2] = blend(A, B, s); d[3] = d[4] = blend(B, B, 1);
-    }
-}
+static int pure_col(int c) { return clampi((5 * c + 1) / 2, OW - 1); } /* ceil(2.5 c) */
 
 int main(int argc, char **argv) {
     if (argc != 4) { fprintf(stderr, "usage: ref <0|1> in.ppm out.ppm\n"); return 1; }
@@ -67,42 +42,47 @@ int main(int argc, char **argv) {
     if (!f || fscanf(f, "P6 %d %d 255", &W, &H) != 2) return 1;
     fgetc(f);
     S = malloc(W * H * sizeof(px));
-    for (int i = 0; i < W * H; i++)
-        for (int k = 0; k < 3; k++) S[i].c[k] = 2 * fgetc(f);
+    if (fread(S, sizeof(px), W * H, f) != (size_t)(W * H)) return 1;
     fclose(f);
-    int ow = W * 5 / 2, oh = H * 5 / 2;
-    px *hs = malloc(ow * H * sizeof(px));     /* horizontally scaled rows */
-    for (int y = 0; y < H; y++) hrow(y, hs + y * ow, sharp);
-#define E(y, x) hs[((y) < 0 ? 0 : (y) >= H ? H - 1 : (y)) * ow + (x)]
-#define R2(x, y) blend(src(x, y), src(x, y), 1) /* raw texel at the hs scale */
-    f = fopen(argv[3], "wb");
-    fprintf(f, "P6\n%d %d\n255\n", ow, oh);
-    for (int oy = 0; oy < oh; oy++) {
-        int j = oy / 5 * 2, ph = oy % 5;
-        for (int x = 0; x < ow; x++) {
-            px A = E(j, x), B = E(j + 1, x), v;
-            if (ph < 2) v = blend(A, A, 1);
-            else if (ph > 2) v = blend(B, B, 1);
-            else {
-                int s = 1;
-                if (sharp && !eq(A, B)) {
-                    px L = E(j - 1, x), R = E(j + 2, x);
-                    int la = eq(L, A), br = eq(B, R);
-                    s = la != br ? (la ? 2 : 0) : 1;
-                    if (la == br && (la || !eq(L, B) || !eq(A, R))) {
-                        int k = x % 5, c0 = x / 5 * 2, n0, n1;
-                        if (k < 2) { n0 = c0 - 1; n1 = c0 + 1; }
-                        else if (k > 2) { n0 = c0; n1 = c0 + 2; }
-                        else { n0 = c0; n1 = c0 + 1; }
-                        s = agree(vote(R2(n0, j - 1), R2(n0, j), R2(n0, j + 1), R2(n0, j + 2), A, B),
-                                  vote(R2(n1, j - 1), R2(n1, j), R2(n1, j + 1), R2(n1, j + 2), A, B));
-                    }
-                }
-                v = blend(A, B, s);
+    OW = W * 5 / 2;
+    int OH = H * 5 / 2;
+    M = malloc(OW * H * sizeof(px));
+
+    for (int y = 0; y < H; y++)
+        for (int x = 0; x < OW; x++) {
+            int k = x % 5, c = x / 5 * 2;
+            px a = src(c, y), b = src(c + 1, y);
+            int w = k < 2 ? 0 : k > 2 ? 2 : 1;
+            if (w == 1 && sharp && !eq(a, b)) {
+                int la = eq(src(c - 1, y), a), br = eq(b, src(c + 2, y));
+                if (la != br) w = la ? 2 : 0;
+                else if (la)
+                    w = agree(vote(src(c - 1, y - 1), src(c, y - 1), src(c + 1, y - 1), src(c + 2, y - 1), a, b),
+                              vote(src(c - 1, y + 1), src(c, y + 1), src(c + 1, y + 1), src(c + 2, y + 1), a, b), w);
             }
-            for (int k = 0; k < 3; k++) fputc((v.c[k] + 4) >> 3, f);
+            M[y * OW + x] = blend(a, b, w);
         }
-    }
+
+    f = fopen(argv[3], "wb");
+    fprintf(f, "P6\n%d %d\n255\n", OW, OH);
+    for (int oy = 0; oy < OH; oy++)
+        for (int x = 0; x < OW; x++) {
+            int k = oy % 5, j = oy / 5 * 2;
+            px a = mid(x, j), b = mid(x, j + 1);
+            int w = k < 2 ? 0 : k > 2 ? 2 : 1;
+            if (w == 1 && sharp && !eq(a, b)) {
+                int la = eq(mid(x, j - 1), a), br = eq(b, mid(x, j + 2));
+                if (la != br) w = la ? 2 : 0;
+                else if (la) {
+                    int kx = x % 5, c = x / 5 * 2;
+                    int xl = pure_col(kx < 2 ? c - 1 : c), xr = pure_col(kx > 2 ? c + 2 : c + 1);
+                    w = agree(vote(mid(xl, j - 1), mid(xl, j), mid(xl, j + 1), mid(xl, j + 2), a, b),
+                              vote(mid(xr, j - 1), mid(xr, j), mid(xr, j + 1), mid(xr, j + 2), a, b), w);
+                }
+            }
+            px o = blend(a, b, w);
+            fwrite(&o, 1, 3, f);
+        }
     fclose(f);
     return 0;
 }

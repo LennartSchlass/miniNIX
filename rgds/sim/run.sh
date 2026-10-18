@@ -21,7 +21,7 @@ done
 ./ref 0 "$IN" out/ref-area.ppm
 ./ref 1 "$IN" out/ref-nitro-sharp.ppm
 
-check() { printf '%-44s ' "$1"; python3 imgtool.py diff "$2" "$3" || FAIL=1; }
+check() { printf '%-44s ' "$1"; python3 imgtool.py diff "$2" "$3" ${4:-1} || FAIL=1; }
 FAIL=0
 check "sharp-shimmerless vs CPU area reference"   out/sharp-shimmerless.ppm out/ref-area.ppm
 check "nitro-sharp (GLES2) vs CPU reference"       out/nitro-sharp.ppm  out/ref-nitro-sharp.ppm
@@ -32,7 +32,8 @@ if [ -z "$1" ]; then
     ./gles_sim sharp-shimmerless out/pattern-hires.ppm out/sharp-shimmerless-hires.ppm 2>/dev/null
     ./gles_sim nitro-sharp out/pattern-hires.ppm out/nitro-sharp-hires.ppm 2>/dev/null
     check "shimmerless hires (512x384) vs 256x192"    out/sharp-shimmerless-hires.ppm out/sharp-shimmerless.ppm
-    check "nitro-sharp hires = plain area filter"      out/nitro-sharp-hires.ppm out/sharp-shimmerless.ppm
+    # 1/4 and 3/4 blends are rounded to 8 bit in the intermediate, so allow a double-rounding step
+    check "nitro-sharp hires = plain area filter"      out/nitro-sharp-hires.ppm out/sharp-shimmerless.ppm 2
 fi
 
 S=""; for m in $METHODS; do S="$S out/$m.ppm $m"; done

@@ -1,5 +1,5 @@
 // Runs the DraStic hook's fragment shaders offscreen (EGL surfaceless, Mesa llvmpipe)
-// with the same quad/UV setup as run_shader_copy().
+// with the same quad/UV setup as run_shader_copy(), including the two-pass nitro-sharp.
 // usage: gles_sim [-desktop] <shader|bilinear|nearest> in.ppm out.ppm [out_w out_h]
 #include <dlfcn.h>
 #include <stdint.h>
@@ -58,6 +58,11 @@ static void *(*eglGetProcAddress)(const char *);
 GL_FUNCS
 #undef GLF
 
+#define GL_TEXTURE_2D 0x0DE1
+#define GL_FRAMEBUFFER 0x8D40
+#define GL_NEAREST 0x2600
+#define GL_LINEAR 0x2601
+
 static const char FRAG_PLAIN[] =
     "#ifdef GL_ES\nprecision highp float;\n#endif\n"
     "varying vec2 v_texcoord;\nuniform sampler2D u_texture;\n"
@@ -78,10 +83,10 @@ static unsigned char *read_ppm(const char *path, int *w, int *h) {
     return rgba;
 }
 
-static GLuint compile(GLenum type, const char *pre, const char *src) {
+static GLuint compile(GLenum type, const char *pre, const char *common, const char *src) {
     GLuint s = glCreateShader(type);
-    const char *srcs[] = { pre, src };
-    glShaderSource(s, 2, srcs, NULL);
+    const char *srcs[] = { pre, common, src };
+    glShaderSource(s, 3, srcs, NULL);
     glCompileShader(s);
     GLint ok = 0;
     glGetShaderiv(s, 0x8B81, &ok);
@@ -92,6 +97,59 @@ static GLuint compile(GLenum type, const char *pre, const char *src) {
         exit(2);
     }
     return s;
+}
+
+static GLuint program(const char *pre, const char *common, const char *frag) {
+    GLuint prog = glCreateProgram();
+    glAttachShader(prog, compile(0x8B31, pre, "", VERT_SRC));
+    glAttachShader(prog, compile(0x8B30, pre, common, frag));
+    glBindAttribLocation(prog, 0, "a_position");
+    glBindAttribLocation(prog, 1, "a_texcoord");
+    glLinkProgram(prog);
+    GLint ok = 0;
+    glGetProgramiv(prog, 0x8B82, &ok);
+    if (!ok) { char log[4096]; glGetProgramInfoLog(prog, sizeof log, NULL, log); fprintf(stderr, "link: %s\n", log); exit(2); }
+    return prog;
+}
+
+static GLuint texture(int w, int h, GLint filter, const void *pixels) {
+    GLuint tex;
+    glGenTextures(1, &tex);
+    glBindTexture(GL_TEXTURE_2D, tex);
+    glTexImage2D(GL_TEXTURE_2D, 0, 0x1908, w, h, 0, 0x1908, 0x1401, pixels);
+    glTexParameteri(GL_TEXTURE_2D, 0x2801, filter);
+    glTexParameteri(GL_TEXTURE_2D, 0x2800, filter);
+    glTexParameteri(GL_TEXTURE_2D, 0x2802, 0x812F);
+    glTexParameteri(GL_TEXTURE_2D, 0x2803, 0x812F);
+    return tex;
+}
+
+static GLuint framebuffer(GLuint tex) {
+    GLuint fb;
+    glGenFramebuffers(1, &fb);
+    glBindFramebuffer(GL_FRAMEBUFFER, fb);
+    glFramebufferTexture2D(GL_FRAMEBUFFER, 0x8CE0, GL_TEXTURE_2D, tex, 0);
+    if (glCheckFramebufferStatus(GL_FRAMEBUFFER) != 0x8CD5) { fprintf(stderr, "fbo incomplete\n"); exit(1); }
+    return fb;
+}
+
+// One pass like run_shader_copy(): quad over the viewport, texture on unit 0
+static void draw(GLuint prog, GLuint src, GLuint fb, int vw, int vh,
+                 float tw, float th, float ow, float oh, float sw, float sh, const GLfloat *verts) {
+    glBindFramebuffer(GL_FRAMEBUFFER, fb);
+    glBindTexture(GL_TEXTURE_2D, src);
+    glViewport(0, 0, vw, vh);
+    glUseProgram(prog);
+    GLint l;
+    glUniform1i(glGetUniformLocation(prog, "u_texture"), 0);
+    if ((l = glGetUniformLocation(prog, "u_texture_size")) >= 0) glUniform2f(l, tw, th);
+    if ((l = glGetUniformLocation(prog, "u_output_size")) >= 0) glUniform2f(l, ow, oh);
+    if ((l = glGetUniformLocation(prog, "u_source_size")) >= 0) glUniform2f(l, sw, sh);
+    glEnableVertexAttribArray(0);
+    glEnableVertexAttribArray(1);
+    glVertexAttribPointer(0, 2, 0x1406, 0, 16, verts);
+    glVertexAttribPointer(1, 2, 0x1406, 0, 16, verts + 2);
+    glDrawArrays(0x0005, 0, 4);
 }
 
 int main(int argc, char **argv) {
@@ -122,68 +180,41 @@ int main(int argc, char **argv) {
     GL_FUNCS
 #undef GLF
 
+    // Same preambles as make_gl_program(); textures here are RGBA so SWIZ is identity
+    const char *pre = desktop ? "#version 120\n#define SWIZ(c) (c)\n" : "#define SWIZ(c) (c)\n";
     const char *frag = NULL;
-    GLint filter = 0x2601; // GL_LINEAR, like SDL's default scale quality in DraStic
+    GLint filter = GL_LINEAR; // SDL's default scale quality in DraStic
+    int nitro = !strcmp(name, "nitro-sharp");
     if (!strcmp(name, "bilinear")) frag = FRAG_PLAIN;
-    else if (!strcmp(name, "nearest")) { frag = FRAG_PLAIN; filter = 0x2600; }
+    else if (!strcmp(name, "nearest")) { frag = FRAG_PLAIN; filter = GL_NEAREST; }
+    else if (nitro) filter = GL_NEAREST; // mirrors shader_tex_filter
     else {
         for (size_t i = 0; i < sizeof FRAGS / sizeof FRAGS[0]; i++)
             if (!strcmp(FRAGS[i].name, name)) frag = *FRAGS[i].src;
-        if (!strcmp(name, "nitro-sharp")) filter = 0x2600; // mirrors shader_tex_filter
     }
-    if (!frag) { fprintf(stderr, "unknown shader %s\n", name); return 1; }
-    // Same preambles as make_gl_program(); textures here are RGBA so SWIZ is identity
-    const char *pre = desktop ? "#version 120\n#define SWIZ(c) (c)\n" : "#define SWIZ(c) (c)\n";
-    if (desktop && !strncmp(frag, "precision mediump float;\n", 25)) frag += 25;
-
-    GLuint prog = glCreateProgram();
-    glAttachShader(prog, compile(0x8B31, pre, VERT_SRC));
-    glAttachShader(prog, compile(0x8B30, pre, frag));
-    glBindAttribLocation(prog, 0, "a_position");
-    glBindAttribLocation(prog, 1, "a_texcoord");
-    glLinkProgram(prog);
-    GLint ok = 0;
-    glGetProgramiv(prog, 0x8B82, &ok);
-    if (!ok) { char log[4096]; glGetProgramInfoLog(prog, sizeof log, NULL, log); fprintf(stderr, "link: %s\n", log); return 2; }
+    if (!frag && !nitro) { fprintf(stderr, "unknown shader %s\n", name); return 1; }
+    if (frag && desktop && !strncmp(frag, "precision mediump float;\n", 25)) frag += 25;
 
     int tw, th;
     unsigned char *img = read_ppm(argv[2], &tw, &th);
-    GLuint tex, fbtex, fb;
     glPixelStorei(0x0CF5, 1);
-    glGenTextures(1, &tex);
-    glBindTexture(0x0DE1, tex);
-    glTexImage2D(0x0DE1, 0, 0x1908, tw, th, 0, 0x1908, 0x1401, img);
-    glTexParameteri(0x0DE1, 0x2801, filter);
-    glTexParameteri(0x0DE1, 0x2800, filter);
-    glTexParameteri(0x0DE1, 0x2802, 0x812F);
-    glTexParameteri(0x0DE1, 0x2803, 0x812F);
+    GLuint src = texture(tw, th, filter, img);
+    GLuint out = texture(out_w, out_h, GL_NEAREST, NULL);
+    GLuint out_fb = framebuffer(out);
 
-    glGenTextures(1, &fbtex);
-    glBindTexture(0x0DE1, fbtex);
-    glTexImage2D(0x0DE1, 0, 0x1908, out_w, out_h, 0, 0x1908, 0x1401, NULL);
-    glGenFramebuffers(1, &fb);
-    glBindFramebuffer(0x8D40, fb);
-    glFramebufferTexture2D(0x8D40, 0x8CE0, 0x0DE1, fbtex, 0);
-    if (glCheckFramebufferStatus(0x8D40) != 0x8CD5) { fprintf(stderr, "fbo incomplete\n"); return 1; }
-    glBindTexture(0x0DE1, tex);
+    // pos(x,y) | uv(u,v), V flipped like the hook's first quad; the second pass is unflipped
+    static const GLfloat flipped[] = { -1, -1, 0, 1,   1, -1, 1, 1,   -1, 1, 0, 0,   1, 1, 1, 0 };
+    static const GLfloat plain[]   = { -1, -1, 0, 0,   1, -1, 1, 0,   -1, 1, 0, 1,   1, 1, 1, 1 };
 
-    glViewport(0, 0, out_w, out_h);
-    glUseProgram(prog);
-    glUniform1i(glGetUniformLocation(prog, "u_texture"), 0);
-    GLint l;
-    if ((l = glGetUniformLocation(prog, "u_texture_size")) >= 0) glUniform2f(l, tw, th);
-    if ((l = glGetUniformLocation(prog, "u_output_size")) >= 0) glUniform2f(l, out_w, out_h);
-    GLfloat verts[] = {
-        -1, -1, 0, 1,
-         1, -1, 1, 1,
-        -1,  1, 0, 0,
-         1,  1, 1, 0,
-    };
-    glEnableVertexAttribArray(0);
-    glEnableVertexAttribArray(1);
-    glVertexAttribPointer(0, 2, 0x1406, 0, 16, verts);
-    glVertexAttribPointer(1, 2, 0x1406, 0, 16, verts + 2);
-    glDrawArrays(0x0005, 0, 4);
+    if (nitro) {
+        GLuint mid = texture(out_w, th, GL_NEAREST, NULL);
+        GLuint mid_fb = framebuffer(mid);
+        GLuint p1 = program(pre, NITRO_COMMON, FRAG_NITRO_H), p2 = program(pre, NITRO_COMMON, FRAG_NITRO_V);
+        draw(p1, src, mid_fb, out_w, th, tw, th, out_w, th, tw, th, flipped);
+        draw(p2, mid, out_fb, out_w, out_h, out_w, th, out_w, out_h, tw, th, plain);
+    } else {
+        draw(program(pre, "", frag), src, out_fb, out_w, out_h, tw, th, out_w, out_h, tw, th, flipped);
+    }
     glFinish();
 
     unsigned char *px = malloc(out_w * out_h * 4);

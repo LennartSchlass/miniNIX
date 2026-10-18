@@ -34,6 +34,16 @@ typedef void          GLvoid;
 #define GL_TRIANGLE_STRIP       0x0005
 #define GL_BLEND                0x0BE2
 #define GL_SCISSOR_TEST         0x0C11
+#define GL_TEXTURE_WRAP_S       0x2802
+#define GL_TEXTURE_WRAP_T       0x2803
+#define GL_CLAMP_TO_EDGE        0x812F
+#define GL_RGBA                 0x1908
+#define GL_UNSIGNED_BYTE        0x1401
+#define GL_TEXTURE_BINDING_2D   0x8069
+#define GL_FRAMEBUFFER          0x8D40
+#define GL_FRAMEBUFFER_BINDING  0x8CA6
+#define GL_COLOR_ATTACHMENT0    0x8CE0
+#define GL_FRAMEBUFFER_COMPLETE 0x8CD5
 
 // --- GLES2 function pointers resolved at runtime ---
 static GLuint (*p_glCreateShader)(GLenum) = NULL;
@@ -62,6 +72,15 @@ static void (*p_glVertexAttribPointer)(GLuint, GLint, GLenum, GLboolean, GLsizei
 static void (*p_glDrawArrays)(GLenum, GLint, GLsizei) = NULL;
 static void (*p_glEnable)(GLenum) = NULL;
 static void (*p_glDisable)(GLenum) = NULL;
+static void (*p_glGenTextures)(GLsizei, GLuint *) = NULL;
+static void (*p_glDeleteTextures)(GLsizei, const GLuint *) = NULL;
+static void (*p_glBindTexture)(GLenum, GLuint) = NULL;
+static void (*p_glTexImage2D)(GLenum, GLint, GLint, GLsizei, GLsizei, GLint, GLenum, GLenum, const GLvoid *) = NULL;
+static void (*p_glGenFramebuffers)(GLsizei, GLuint *) = NULL;
+static void (*p_glDeleteFramebuffers)(GLsizei, const GLuint *) = NULL;
+static void (*p_glBindFramebuffer)(GLenum, GLuint) = NULL;
+static void (*p_glFramebufferTexture2D)(GLenum, GLenum, GLenum, GLuint, GLint) = NULL;
+static GLenum (*p_glCheckFramebufferStatus)(GLenum) = NULL;
 
 // --- Shader state ---
 #define SHADER_NONE 0 // No shader; use GL's built-in bilinear filtering (default)
@@ -80,6 +99,14 @@ static GLint loc_texture = -1;
 static GLint loc_texture_size = -1;
 static GLint loc_output_size = -1; // sharp-bilinear only
 static GLint shader_tex_filter = 0; // texture filter forced during the shader pass, 0 = keep SDL's
+// Second pass of a two-pass shader (nitro-sharp): vertical scaling of the first pass's rows
+static GLuint shader_program2 = 0;
+static GLint loc2_texture = -1;
+static GLint loc2_texture_size = -1;
+static GLint loc2_output_size = -1;
+static GLint loc2_source_size = -1;
+static GLuint pass_fbo[2], pass_tex[2];
+static int pass_w = 0, pass_h = 0;
 static int shader_frame_calls = 0;
 
 // --- DS / window state (declared before all functions that use them) ---
@@ -163,6 +190,15 @@ static void init_gl_funcs(void) {
     GLSYM(glDrawArrays);
     GLSYM(glEnable);
     GLSYM(glDisable);
+    GLSYM(glGenTextures);
+    GLSYM(glDeleteTextures);
+    GLSYM(glBindTexture);
+    GLSYM(glTexImage2D);
+    GLSYM(glGenFramebuffers);
+    GLSYM(glDeleteFramebuffers);
+    GLSYM(glBindFramebuffer);
+    GLSYM(glFramebufferTexture2D);
+    GLSYM(glCheckFramebufferStatus);
 #undef GLSYM
     if (!p_glCreateShader) {
         // SDL_GL_GetProcAddress failed (no GL context yet, or software renderer).
@@ -194,6 +230,15 @@ static void init_gl_funcs(void) {
         GLSYM(glDrawArrays);
         GLSYM(glEnable);
         GLSYM(glDisable);
+        GLSYM(glGenTextures);
+        GLSYM(glDeleteTextures);
+        GLSYM(glBindTexture);
+        GLSYM(glTexImage2D);
+        GLSYM(glGenFramebuffers);
+        GLSYM(glDeleteFramebuffers);
+        GLSYM(glBindFramebuffer);
+        GLSYM(glFramebufferTexture2D);
+        GLSYM(glCheckFramebufferStatus);
 #undef GLSYM
     }
 }
@@ -367,17 +412,15 @@ static const char *FRAG_QUILEZ =
 
 // Nitro-sharp: area filter like sharp-shimmerless, but at scales >= 2 a blended pixel takes
 // the colour of a 1-texel-wide feature instead (EPX-style rule: l==a, b!=r -> b), so thin
-// lines and font strokes become a uniform 3 px instead of 2 px + a half-tone. Where the
-// rule is undecided because both sides are wider than a texel (e.g. the top of a T above
-// its stem) it follows the parallel edges next to it, so strokes keep a constant width at
-// junctions. Alternating texels (dithering, l == b and a == r) just blend, which keeps
-// that common case cheap.
-// Flat areas, dithering and 3D rarely match exactly and keep the 50/50 blend. Colours must
-// match exactly; the tolerance only absorbs float error (blends sit on 0.5/255 steps).
-// side(): 1.0 = b takes the blended pixel, 0.0 = a, 0.5 = undecided. vote(): which colour
-// a neighbouring parallel edge gave its blended pixel. Horizontal pass first, then
-// vertical on the horizontally scaled rows. Needs GL_NEAREST.
-static const char *FRAG_NITRO_SHARP =
+// lines and font strokes become a uniform 3 px instead of 2 px + a half-tone. Where both
+// sides are wider than a texel (e.g. the top of a T above its stem) it follows the parallel
+// edges next to it, so strokes keep a constant width at junctions. Everything else (flat
+// areas, dithering, 3D) keeps the 50/50 blend. Colours must match exactly; the tolerance
+// only absorbs float error. Needs GL_NEAREST.
+// Two passes (rows to output width, then columns) keep the per-pixel work flat: 2-4
+// fetches in each pass plus 8 for the rare junction check, instead of the 16-56 dependent
+// fetches a single pass needs.
+static const char *NITRO_COMMON =
     "#ifdef GL_ES\n"
     "#ifdef GL_FRAGMENT_PRECISION_HIGH\n"
     "precision highp float;\n"
@@ -389,90 +432,93 @@ static const char *FRAG_NITRO_SHARP =
     "uniform sampler2D u_texture;\n"
     "uniform vec2 u_texture_size;\n"
     "uniform vec2 u_output_size;\n"
+    "uniform vec2 u_source_size;\n"
     "vec4 T(float x, float y) {\n"
-    "    return SWIZ(texture2D(u_texture, vec2(x, y) / u_texture_size));\n"
+    "    return texture2D(u_texture, vec2(x, y) / u_texture_size);\n"
     "}\n"
     "bool eq(vec4 a, vec4 b) {\n"
     "    vec3 d = abs(a.rgb - b.rgb);\n"
     "    return max(d.r, max(d.g, d.b)) < 0.0015;\n"
     "}\n"
-    "float side(vec4 l, vec4 a, vec4 b, vec4 r) {\n"
-    "    bool la = eq(l, a), br = eq(b, r);\n"
-    "    if (la && !br) return 1.0;\n"
-    "    if (br && !la) return 0.0;\n"
-    "    return 0.5;\n"
+    "float snap(float w) {\n"
+    "    w = mix(w, floor(w + 0.5), step(0.49, abs(w - 0.5)));\n"
+    "    return mix(w, 0.5, step(abs(w - 0.5), 0.01));\n"
     "}\n"
     "float vote(vec4 nl, vec4 na, vec4 nb, vec4 nr, vec4 a, vec4 b) {\n"
-    "    if (eq(na, nb)) return 0.0;\n"
-    "    float s = side(nl, na, nb, nr);\n"
-    "    if (s == 0.5) return 0.0;\n"
-    "    vec4 c = s > 0.5 ? nb : na;\n"
-    "    if (eq(c, b)) return 1.0;\n"
-    "    if (eq(c, a)) return -1.0;\n"
-    "    return 0.0;\n"
+    "    bool la = eq(nl, na), br = eq(nb, nr);\n"
+    "    if (la == br || eq(na, nb)) return 0.0;\n"
+    "    vec4 c = la ? nb : na;\n"
+    "    return eq(c, b) ? 1.0 : eq(c, a) ? -1.0 : 0.0;\n"
     "}\n"
-    "float agree(float v0, float v1) {\n"
-    "    if (max(v0, v1) > 0.0 && min(v0, v1) >= 0.0) return 1.0;\n"
-    "    if (min(v0, v1) < 0.0 && max(v0, v1) <= 0.0) return 0.0;\n"
-    "    return 0.5;\n"
-    "}\n"
-    "float hside(float y, float i, vec4 a, vec4 b) {\n"
-    "    vec4 l = T(i - 1.5, y), r = T(i + 1.5, y);\n"
-    "    bool la = eq(l, a), br = eq(b, r);\n"
-    "    if (la != br) return la ? 1.0 : 0.0;\n"
-    "    if (!la && eq(l, b) && eq(a, r)) return 0.5;\n"
-    "    return agree(\n"
-    "        vote(T(i - 1.5, y - 1.0), T(i - 0.5, y - 1.0), T(i + 0.5, y - 1.0), T(i + 1.5, y - 1.0), a, b),\n"
-    "        vote(T(i - 1.5, y + 1.0), T(i - 0.5, y + 1.0), T(i + 0.5, y + 1.0), T(i + 1.5, y + 1.0), a, b));\n"
-    "}\n"
-    "vec4 H(float y, float i, float w, bool rule) {\n"
-    "    if (w <= 0.0) return T(i - 0.5, y);\n"
-    "    if (w >= 1.0) return T(i + 0.5, y);\n"
+    "float agree(float v0, float v1, float w) {\n"
+    "    if (v0 + v1 > 0.0 && min(v0, v1) >= 0.0) return 1.0;\n"
+    "    if (v0 + v1 < 0.0 && max(v0, v1) <= 0.0) return 0.0;\n"
+    "    return w;\n"
+    "}\n";
+
+// snap(): blend weight forced to exactly 0, 1/2 or 1 despite interpolation error.
+// vote(): which colour a neighbouring parallel edge nl|na|nb|nr gave its blended pixel,
+// 1 for b, -1 for a, 0 if undecided or neither. agree(): both neighbours' verdict.
+static const char *FRAG_NITRO_H =
+    "void main() {\n"
+    "    float scale = u_output_size.x / u_texture_size.x;\n"
+    "    float y = floor(v_texcoord.y * u_texture_size.y) + 0.5;\n"
+    "    float p = v_texcoord.x * u_texture_size.x;\n"
+    "    float i = floor(p + 0.5);\n"
+    "    float w = snap(clamp((p - i) * scale + 0.5, 0.0, 1.0));\n"
     "    vec4 a = T(i - 0.5, y), b = T(i + 0.5, y);\n"
-    "    if (rule && !eq(a, b)) {\n"
-    "        float s = hside(y, i, a, b);\n"
-    "        if (s != 0.5) w = s;\n"
+    "    if (scale >= 2.0 && w > 0.0 && w < 1.0 && !eq(a, b)) {\n"
+    "        bool la = eq(T(i - 1.5, y), a), br = eq(b, T(i + 1.5, y));\n"
+    "        if (la != br) w = la ? 1.0 : 0.0;\n"
+    "        else if (la) w = agree(\n"
+    "            vote(T(i - 1.5, y - 1.0), T(i - 0.5, y - 1.0), T(i + 0.5, y - 1.0), T(i + 1.5, y - 1.0), a, b),\n"
+    "            vote(T(i - 1.5, y + 1.0), T(i - 0.5, y + 1.0), T(i + 0.5, y + 1.0), T(i + 1.5, y + 1.0), a, b), w);\n"
     "    }\n"
-    "    return mix(a, b, w);\n"
-    "}\n"
-    "float vcol(float x, float i, vec4 a, vec4 b) {\n"
-    "    return vote(T(x, i - 1.5), T(x, i - 0.5), T(x, i + 0.5), T(x, i + 1.5), a, b);\n"
+    "    gl_FragColor = SWIZ(mix(a, b, w));\n"
+    "}\n";
+
+// Vertical pass over the horizontally scaled rows, which are already in output channel
+// order. The junction check needs the source columns next to this one; pure_col() finds
+// the first output column that lies entirely inside a source column.
+static const char *FRAG_NITRO_V =
+    "float pure_col(float c, float sx) {\n"
+    "    return clamp(ceil(c * sx - 0.01), 0.0, u_texture_size.x - 1.0) + 0.5;\n"
     "}\n"
     "void main() {\n"
-    "    vec2 scale = u_output_size / u_texture_size;\n"
-    "    vec2 p = v_texcoord * u_texture_size;\n"
-    "    vec2 i = floor(p + 0.5);\n"
-    "    vec2 w = clamp((p - i) * scale + 0.5, 0.0, 1.0);\n"
-    "    w = mix(w, floor(w + 0.5), step(0.49, abs(w - 0.5)));\n"
-    "    bvec2 rule = greaterThanEqual(scale, vec2(2.0));\n"
-    "    if (w.y <= 0.0) { gl_FragColor = H(i.y - 0.5, i.x, w.x, rule.x); return; }\n"
-    "    if (w.y >= 1.0) { gl_FragColor = H(i.y + 0.5, i.x, w.x, rule.x); return; }\n"
-    "    vec4 a = H(i.y - 0.5, i.x, w.x, rule.x), b = H(i.y + 0.5, i.x, w.x, rule.x);\n"
-    "    float wy = w.y;\n"
-    "    if (rule.y && !eq(a, b)) {\n"
-    "        vec4 l = H(i.y - 1.5, i.x, w.x, rule.x), r = H(i.y + 1.5, i.x, w.x, rule.x);\n"
-    "        bool la = eq(l, a), br = eq(b, r);\n"
-    "        float s = la != br ? (la ? 1.0 : 0.0) : 0.5;\n"
-    "        if (la == br && (la || !eq(l, b) || !eq(a, r))) {\n"
-    "            float c = w.x <= 0.0 ? i.x - 0.5 : w.x >= 1.0 ? i.x + 0.5 : i.x;\n"
-    "            float d = w.x <= 0.0 || w.x >= 1.0 ? 1.0 : 0.5;\n"
-    "            s = agree(vcol(c - d, i.y, a, b), vcol(c + d, i.y, a, b));\n"
+    "    float scale = u_output_size.y / u_texture_size.y;\n"
+    "    float x = floor(v_texcoord.x * u_texture_size.x) + 0.5;\n"
+    "    float p = v_texcoord.y * u_texture_size.y;\n"
+    "    float i = floor(p + 0.5);\n"
+    "    float w = snap(clamp((p - i) * scale + 0.5, 0.0, 1.0));\n"
+    "    if (w <= 0.0) { gl_FragColor = T(x, i - 0.5); return; }\n"
+    "    if (w >= 1.0) { gl_FragColor = T(x, i + 0.5); return; }\n"
+    "    vec4 a = T(x, i - 0.5), b = T(x, i + 0.5);\n"
+    "    if (scale >= 2.0 && !eq(a, b)) {\n"
+    "        bool la = eq(T(x, i - 1.5), a), br = eq(b, T(x, i + 1.5));\n"
+    "        if (la != br) w = la ? 1.0 : 0.0;\n"
+    "        else if (la) {\n"
+    "            float sx = u_texture_size.x / u_source_size.x;\n"
+    "            float q = x / sx;\n"
+    "            float j = floor(q + 0.5);\n"
+    "            float wx = snap(clamp((q - j) * sx + 0.5, 0.0, 1.0));\n"
+    "            float xl = pure_col(j - 1.0 - step(wx, 0.0), sx), xr = pure_col(j + step(1.0, wx), sx);\n"
+    "            w = agree(vote(T(xl, i - 1.5), T(xl, i - 0.5), T(xl, i + 0.5), T(xl, i + 1.5), a, b),\n"
+    "                      vote(T(xr, i - 1.5), T(xr, i - 0.5), T(xr, i + 0.5), T(xr, i + 1.5), a, b), w);\n"
     "        }\n"
-    "        if (s != 0.5) wy = s;\n"
     "    }\n"
-    "    gl_FragColor = mix(a, b, wy);\n"
+    "    gl_FragColor = mix(a, b, w);\n"
     "}\n";
 
 // ---------------------------------------------------------------------------
 // Shader program helpers
 // ---------------------------------------------------------------------------
 
-static GLuint make_gl_shader(GLenum type, const char *preamble, const char *src) {
+static GLuint make_gl_shader(GLenum type, const char *preamble, const char *common, const char *src) {
     if (!p_glCreateShader) return 0;
     GLuint s = p_glCreateShader(type);
     if (!s) return 0;
-    const GLchar *srcs[] = { preamble, src };
-    p_glShaderSource(s, 2, (const GLchar *const *)srcs, NULL);
+    const GLchar *srcs[] = { preamble, common, src };
+    p_glShaderSource(s, 3, (const GLchar *const *)srcs, NULL);
     p_glCompileShader(s);
     GLint ok = GL_FALSE;
     p_glGetShaderiv(s, GL_COMPILE_STATUS, &ok);
@@ -480,7 +526,7 @@ static GLuint make_gl_shader(GLenum type, const char *preamble, const char *src)
     return s;
 }
 
-static GLuint make_gl_program(const char *vert_src, const char *frag_src) {
+static GLuint make_gl_program(const char *vert_src, const char *frag_common, const char *frag_src) {
     // GLSL ES 1.00 (GLES2) shaders need two tweaks to compile under desktop OpenGL:
     //   - Prepend "#version 120" so attribute/varying/texture2D are available
     //   - Drop "precision mediump float;" which is GLES2-only and invalid in desktop GLSL
@@ -499,9 +545,9 @@ static GLuint make_gl_program(const char *vert_src, const char *frag_src) {
             strncmp(frag_src, FRAG_ES_PREFIX, sizeof(FRAG_ES_PREFIX) - 1) == 0)
         fbody = frag_src + sizeof(FRAG_ES_PREFIX) - 1;
 
-    GLuint vert = make_gl_shader(GL_VERTEX_SHADER, vpreamble, vert_src);
+    GLuint vert = make_gl_shader(GL_VERTEX_SHADER, vpreamble, "", vert_src);
     if (!vert) return 0;
-    GLuint frag = make_gl_shader(GL_FRAGMENT_SHADER, fpreamble, fbody);
+    GLuint frag = make_gl_shader(GL_FRAGMENT_SHADER, fpreamble, frag_common, fbody);
     if (!frag) { p_glDeleteShader(vert); return 0; }
     GLuint prog = p_glCreateProgram();
     if (!prog) { p_glDeleteShader(vert); p_glDeleteShader(frag); return 0; }
@@ -519,6 +565,36 @@ static GLuint make_gl_program(const char *vert_src, const char *frag_src) {
     return prog;
 }
 
+// Intermediate targets of the two-pass shader, output width x source rows. Two of them, so
+// the second DS screen's first pass doesn't have to wait for the first screen's second pass.
+static int alloc_pass_targets(int w, int h) {
+    if (!p_glGenFramebuffers || !p_glCheckFramebufferStatus) return 0;
+    if (!pass_fbo[0]) {
+        p_glGenFramebuffers(2, pass_fbo);
+        p_glGenTextures(2, pass_tex);
+    }
+    GLint saved_fbo = 0, saved_tex = 0;
+    p_glGetIntegerv(GL_FRAMEBUFFER_BINDING, &saved_fbo);
+    p_glGetIntegerv(GL_TEXTURE_BINDING_2D, &saved_tex);
+    int ok = 1;
+    for (int t = 0; t < 2; t++) {
+        p_glBindTexture(GL_TEXTURE_2D, pass_tex[t]);
+        p_glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, w, h, 0, GL_RGBA, GL_UNSIGNED_BYTE, NULL);
+        p_glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+        p_glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+        p_glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+        p_glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+        p_glBindFramebuffer(GL_FRAMEBUFFER, pass_fbo[t]);
+        p_glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, pass_tex[t], 0);
+        if (p_glCheckFramebufferStatus(GL_FRAMEBUFFER) != GL_FRAMEBUFFER_COMPLETE) ok = 0;
+    }
+    p_glBindFramebuffer(GL_FRAMEBUFFER, saved_fbo);
+    p_glBindTexture(GL_TEXTURE_2D, saved_tex);
+    pass_w = ok ? w : 0;
+    pass_h = ok ? h : 0;
+    return ok;
+}
+
 // Called from SDL_CreateRenderer once the GLES2 context is live
 static void init_shader_program(void) {
     if (shader_mode == SHADER_NONE) return;
@@ -526,18 +602,34 @@ static void init_shader_program(void) {
     fprintf(stderr, "[drastouch] init_shader: mode=%d glCreateShader=%s\n",
             shader_mode, p_glCreateShader ? "ok" : "NULL");
     if (!p_glCreateShader) { shader_mode = SHADER_NONE; return; }
-    const char *frag;
+    const char *frag, *common = "";
     switch (shader_mode) {
         case SHADER_SHARP_SHIMMERLESS: frag = FRAG_SHARP_SHIMMERLESS; break;
         case SHADER_QUILEZ:            frag = FRAG_QUILEZ;            break;
         case SHADER_SCANLINES:         frag = FRAG_SCANLINES;         break;
         case SHADER_LCD3X:             frag = FRAG_LCD3X;             break;
         case SHADER_LCD1X_NDS_COLOR:   frag = FRAG_LCD1X_NDS_COLOR;   break;
-        case SHADER_NITRO_SHARP:       frag = FRAG_NITRO_SHARP;       shader_tex_filter = GL_NEAREST; break;
+        case SHADER_NITRO_SHARP:       frag = FRAG_NITRO_H; common = NITRO_COMMON; shader_tex_filter = GL_NEAREST; break;
         default:                       frag = FRAG_SHARP_BILINEAR;    break;
     }
-    shader_program = make_gl_program(VERT_SRC, frag);
-    fprintf(stderr, "[drastouch] shader_program=%u\n", shader_program);
+    shader_program = make_gl_program(VERT_SRC, common, frag);
+    if (shader_program && shader_mode == SHADER_NITRO_SHARP) {
+        shader_program2 = make_gl_program(VERT_SRC, NITRO_COMMON, FRAG_NITRO_V);
+        if (!shader_program2 || !alloc_pass_targets(64, 64)) {
+            fprintf(stderr, "[drastouch] no framebuffer for nitro-sharp, using sharp-shimmerless\n");
+            if (shader_program2) p_glDeleteProgram(shader_program2);
+            shader_program2 = 0;
+            p_glDeleteProgram(shader_program);
+            shader_program = make_gl_program(VERT_SRC, "", FRAG_SHARP_SHIMMERLESS);
+            shader_tex_filter = 0;
+        } else {
+            loc2_texture      = p_glGetUniformLocation(shader_program2, "u_texture");
+            loc2_texture_size = p_glGetUniformLocation(shader_program2, "u_texture_size");
+            loc2_output_size  = p_glGetUniformLocation(shader_program2, "u_output_size");
+            loc2_source_size  = p_glGetUniformLocation(shader_program2, "u_source_size");
+        }
+    }
+    fprintf(stderr, "[drastouch] shader_program=%u shader_program2=%u\n", shader_program, shader_program2);
     if (!shader_program) { shader_mode = SHADER_NONE; return; }
     loc_texture      = p_glGetUniformLocation(shader_program, "u_texture");
     loc_texture_size = p_glGetUniformLocation(shader_program, "u_texture_size");
@@ -583,8 +675,21 @@ static int run_shader_copy(SDL_Renderer *r, SDL_Texture *texture,
         goto fallback;
     }
 
+    // Two-pass shaders render the rows into an intermediate target first
+    int src_h = srcrect ? srcrect->h : tex_h;
+    int two_pass = shader_program2 != 0;
+    if (two_pass && (pass_w != gl_w || pass_h != src_h)) {
+        two_pass = alloc_pass_targets(gl_w, src_h);
+        if (!two_pass) {
+            fprintf(stderr, "[drastouch] intermediate target %dx%d failed\n", gl_w, src_h);
+            SDL_GL_UnbindTexture(texture);
+            goto fallback;
+        }
+    }
+    int pass_idx = shader_frame_calls & 1;
+
     // Save GL state we will modify
-    GLint saved_viewport[4], saved_program, saved_abuf, saved_blend, saved_scissor;
+    GLint saved_viewport[4], saved_program, saved_abuf, saved_blend, saved_scissor, saved_fbo = 0;
     p_glGetIntegerv(GL_VIEWPORT,             saved_viewport);
     p_glGetIntegerv(GL_CURRENT_PROGRAM,      &saved_program);
     p_glGetIntegerv(GL_ARRAY_BUFFER_BINDING, &saved_abuf);
@@ -602,13 +707,19 @@ static int run_shader_copy(SDL_Renderer *r, SDL_Texture *texture,
         p_glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, shader_tex_filter);
     }
 
-    p_glViewport(gl_x, gl_y, gl_w, gl_h);
+    if (two_pass) {
+        p_glGetIntegerv(GL_FRAMEBUFFER_BINDING, &saved_fbo);
+        p_glBindFramebuffer(GL_FRAMEBUFFER, pass_fbo[pass_idx]);
+        p_glViewport(0, 0, gl_w, src_h);
+    } else {
+        p_glViewport(gl_x, gl_y, gl_w, gl_h);
+    }
     p_glUseProgram(shader_program);
     if (loc_texture >= 0) p_glUniform1i(loc_texture, 0);
     if (loc_texture_size >= 0)
         p_glUniform2f(loc_texture_size, (float)tex_w, (float)tex_h);
     if (loc_output_size >= 0)
-        p_glUniform2f(loc_output_size, (float)gl_w, (float)gl_h);
+        p_glUniform2f(loc_output_size, (float)gl_w, two_pass ? (float)src_h : (float)gl_h);
 
     // UV sub-rectangle within the source texture
     float u0 = 0.0f, v0 = 0.0f, u1 = texw, v1 = texh;
@@ -635,6 +746,32 @@ static int run_shader_copy(SDL_Renderer *r, SDL_Texture *texture,
     p_glVertexAttribPointer(0, 2, GL_FLOAT, GL_FALSE, 4 * sizeof(GLfloat), verts);
     p_glVertexAttribPointer(1, 2, GL_FLOAT, GL_FALSE, 4 * sizeof(GLfloat), verts + 2);
     p_glDrawArrays(GL_TRIANGLE_STRIP, 0, 4);
+
+    if (shader_tex_filter) {
+        p_glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, saved_min_filter);
+        p_glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, saved_mag_filter);
+    }
+
+    if (two_pass) {
+        // The intermediate holds the rows bottom-up like the GL viewport, so no flip here
+        static const GLfloat verts2[] = {
+            -1.0f, -1.0f,  0.0f, 0.0f,
+             1.0f, -1.0f,  1.0f, 0.0f,
+            -1.0f,  1.0f,  0.0f, 1.0f,
+             1.0f,  1.0f,  1.0f, 1.0f,
+        };
+        p_glBindFramebuffer(GL_FRAMEBUFFER, saved_fbo);
+        p_glBindTexture(GL_TEXTURE_2D, pass_tex[pass_idx]);
+        p_glViewport(gl_x, gl_y, gl_w, gl_h);
+        p_glUseProgram(shader_program2);
+        if (loc2_texture >= 0) p_glUniform1i(loc2_texture, 0);
+        if (loc2_texture_size >= 0) p_glUniform2f(loc2_texture_size, (float)gl_w, (float)src_h);
+        if (loc2_output_size >= 0)  p_glUniform2f(loc2_output_size, (float)gl_w, (float)gl_h);
+        if (loc2_source_size >= 0)  p_glUniform2f(loc2_source_size, (float)tex_w, (float)tex_h);
+        p_glVertexAttribPointer(0, 2, GL_FLOAT, GL_FALSE, 4 * sizeof(GLfloat), verts2);
+        p_glVertexAttribPointer(1, 2, GL_FLOAT, GL_FALSE, 4 * sizeof(GLfloat), verts2 + 2);
+        p_glDrawArrays(GL_TRIANGLE_STRIP, 0, 4);
+    }
     // SDL2's GLES2 renderer caches whether attrib arrays 0/1 are enabled and skips
     // re-enabling them when it thinks they're already on.  Leaving them enabled here
     // keeps that cache consistent on libmali (opengles2 renderer).
@@ -645,10 +782,6 @@ static int run_shader_copy(SDL_Renderer *r, SDL_Texture *texture,
         p_glDisableVertexAttribArray(1);
     }
 
-    if (shader_tex_filter) {
-        p_glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, saved_min_filter);
-        p_glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, saved_mag_filter);
-    }
     SDL_GL_UnbindTexture(texture);
 
     p_glUseProgram(saved_program);
@@ -1068,9 +1201,20 @@ static void cleanup(void) {
     if (mic_device > 0 && real_SDL_CloseAudioDevice) {
         real_SDL_CloseAudioDevice(mic_device);
     }
+    // GL objects die with the context; only clean up while one is still current
+    if (!SDL_GL_GetCurrentContext()) return;
     if (shader_program && p_glDeleteProgram) {
         p_glDeleteProgram(shader_program);
         shader_program = 0;
+    }
+    if (shader_program2 && p_glDeleteProgram) {
+        p_glDeleteProgram(shader_program2);
+        shader_program2 = 0;
+    }
+    if (pass_fbo[0] && p_glDeleteFramebuffers) {
+        p_glDeleteFramebuffers(2, pass_fbo);
+        p_glDeleteTextures(2, pass_tex);
+        pass_fbo[0] = 0;
     }
 }
 

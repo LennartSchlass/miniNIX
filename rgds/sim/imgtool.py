@@ -148,14 +148,14 @@ def double(im):  # emulate DraStic Hi-Res 3D: 2D layers nearest-doubled to 512x3
             o.p[y * o.w + x] = im.p[(y // 2) * im.w + x // 2]
     return o
 
-def diff(a, b):
+def diff(a, b, tol=1):
     a, b = load_ppm(a), load_ppm(b)
     assert (a.w, a.h) == (b.w, b.h)
     m, n = 0, 0
     for p, q in zip(a.p, b.p):
         d = max(abs(p[i] - q[i]) for i in range(3))
         m = max(m, d)
-        n += d > 1
+        n += d > tol
     return m, n
 
 def sheet(out, files, labels, crop, zoom):
@@ -183,8 +183,9 @@ if __name__ == '__main__':
         p.save_ppm(sys.argv[2])
         double(p).save_ppm(sys.argv[3])
     elif cmd == 'diff':
-        m, n = diff(sys.argv[2], sys.argv[3])
-        print(f"max channel diff {m}, pixels off by >1: {n}")
+        tol = int(sys.argv[4]) if len(sys.argv) > 4 else 1
+        m, n = diff(sys.argv[2], sys.argv[3], tol)
+        print(f"max channel diff {m}, pixels off by >{tol}: {n}")
         sys.exit(0 if n == 0 else 1)
     elif cmd == 'png':
         load_ppm(sys.argv[2]).save_png(sys.argv[3])
