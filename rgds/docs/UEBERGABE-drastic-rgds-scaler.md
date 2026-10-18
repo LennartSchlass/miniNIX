@@ -299,3 +299,6 @@ Hinweis: Defaults in `system.cfg` greifen nur bei frischem `/storage` (Neu-Flash
 - Bootet mit dem Specific-Image (Generic bleibt schwarz: RG353-u-boot kennt das RG DS nicht).
 - Grundfunktion ok laut Nutzer.
 - Hi-Res 3D läuft nicht flüssig → bleibt aus (Default). area-sharp wirkt ohnehin nur bei 256×192 (2,5x).
+- Icons: funktionieren mit echten ROMs (Pokémon SW2/Platin, FF IV, Mario Kart); entstehen nur beim Boot → nach ROM-Kopie neu starten.
+- Touch: per `evtest` gemessen – `fe5c0000` (event2) = oberes Panel, `fe5e0000` (event3) = unteres, beide nicht gedreht. Die ROCKNIX-Kalibrierung (`touchcontrol`) ist korrekt; ein Tausch (4eb35ff) war falsch und ist revertiert (0202985). Diagnose-Hook mit Touch-Log: siehe Sitzung, `touch_dbg()` in einer Kopie von libdrastouch.c.
+- Boot ins letzte Spiel als befremdlich empfunden → Default `nds.bootlastgame=0`.
