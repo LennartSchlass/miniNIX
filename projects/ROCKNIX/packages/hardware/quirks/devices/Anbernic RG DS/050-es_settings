@@ -2,14 +2,29 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright (C) 2026-present ROCKNIX (https://github.com/ROCKNIX)
 
-# The touchscreen is the second output, which is empty outside dual-screen apps.
-# A tap there takes keyboard focus from EmulationStation and SDL then drops all
-# pad input, so let ES read the pad without focus.
 ES_CONF="/storage/.config/emulationstation/es_settings.cfg"
 if [ ! -f "${ES_CONF}" ]; then
   mkdir -p "${ES_CONF%/*}"
   cp /usr/config/emulationstation/es_settings.cfg "${ES_CONF}"
 fi
-if ! grep -q 'name="BackgroundJoystickInput"' "${ES_CONF}"; then
-  sed -i 's|</config>|\t<bool name="BackgroundJoystickInput" value="true" />\n</config>|' "${ES_CONF}"
-fi
+
+add_es_setting() {
+  if ! grep -q "name=\"${2}\"" "${ES_CONF}"; then
+    sed -i "s|</config>|\t<${1} name=\"${2}\" value=\"${3}\" />\n</config>|" "${ES_CONF}"
+  fi
+}
+
+# The touchscreen is the second output, which is empty outside dual-screen apps.
+# A tap there takes keyboard focus from EmulationStation and SDL then drops all
+# pad input, so let ES read the pad without focus.
+add_es_setting bool BackgroundJoystickInput true
+
+# DS-only: boot straight into the nds game list and hide every other system.
+HIDDEN_SYSTEMS=$(sed -n 's|.*<name>\(.*\)</name>.*|\1|p' /usr/config/emulationstation/es_systems.cfg 2>/dev/null | grep -vx nds | tr '\n' ';' | sed 's|;$||')
+add_es_setting string StartupSystem nds
+add_es_setting bool StartupOnGameList true
+add_es_setting bool LoadEmptySystems true
+add_es_setting string HiddenSystems "${HIDDEN_SYSTEMS}"
+add_es_setting string CollectionSystemsAuto ""
+add_es_setting bool QuickSystemSelect false
+add_es_setting bool LocalArt true

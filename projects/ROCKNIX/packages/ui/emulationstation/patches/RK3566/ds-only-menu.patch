@@ -1,0 +1,211 @@
+diff --git a/CMakeLists.txt b/CMakeLists.txt
+index b483915..9ac7565 100644
+--- a/CMakeLists.txt
++++ b/CMakeLists.txt
+@@ -21,6 +21,7 @@ option(BCM "BCM host" OFF)
+ option(BATOCERA "Set to ON to enable BATOCERA specific code" OFF)
+ option(RETROBAT "Set to ON to enable RETROBAT specific code" OFF)
+ option(ROCKNIX "Set to ON to enable ROCKNIX specific code" OFF)
++option(ROCKNIX_DS_ONLY "Set to ON to trim menus for a DraStic-only image" OFF)
+ 
+ option(ENABLE_FILEMANAGER "Set to ON to enable f1 shortcut for filesystem" OFF)
+ option(DISABLE_KODI "Set to ON to disable kodi in menu" OFF)
+@@ -126,6 +127,11 @@ if(ROCKNIX)
+   add_definitions(-DROCKNIX)
+ endif()
+ 
++if(ROCKNIX_DS_ONLY)
++  MESSAGE("ROCKNIX DS-only build")
++  add_definitions(-DROCKNIX_DS_ONLY)
++endif()
++
+ if(BATTERYPLUS)
+   MESSAGE("batteryplus build")
+   add_definitions(-DBATTERYPLUS)
+diff --git a/es-app/src/NetworkThread.cpp b/es-app/src/NetworkThread.cpp
+index 98d6205..6db76bd 100644
+--- a/es-app/src/NetworkThread.cpp
++++ b/es-app/src/NetworkThread.cpp
+@@ -19,8 +19,10 @@ NetworkThread::NetworkThread(Window* window) : mWindow(window)
+ 	mgr->RegisterComponent(new BatteryLevelWatcher());
+ 	mgr->RegisterComponent(new NetworkStateWatcher());
+ 
++#ifndef ROCKNIX_DS_ONLY
+ 	if (ApiSystem::getInstance()->isScriptingSupported(ApiSystem::UPGRADE))
+ 		mgr->RegisterComponent(&mCheckUpdatesComponent);
++#endif
+ 
+ 	if (ApiSystem::getInstance()->isScriptingSupported(ApiSystem::PADSINFO))
+ 		mgr->RegisterComponent(&mCheckPadsBatteryLevelComponent);
+diff --git a/es-app/src/guis/GuiGameOptions.cpp b/es-app/src/guis/GuiGameOptions.cpp
+index d1e9857..d3028a4 100644
+--- a/es-app/src/guis/GuiGameOptions.cpp
++++ b/es-app/src/guis/GuiGameOptions.cpp
+@@ -393,6 +393,7 @@ GuiGameOptions::GuiGameOptions(Window* window, FileData* game) : GuiComponent(wi
+ 	{
+ 		mMenu.addGroup(_("OPTIONS"));
+ 		
++#ifndef ROCKNIX_DS_ONLY
+ 		mMenu.addEntry(_("SCRAPE"), false, [this, game]
+ 		{
+ 			ScraperSearchParams scraperParams;
+@@ -413,6 +414,7 @@ GuiGameOptions::GuiGameOptions(Window* window, FileData* game) : GuiComponent(wi
+ 
+ 			close();
+ 		});
++#endif
+ 
+ 		if (ApiSystem::getInstance()->isScriptingSupported(ApiSystem::ScriptId::EVMAPY) && game->getType() != FOLDER)
+ 		{
+diff --git a/es-app/src/guis/GuiMenu.cpp b/es-app/src/guis/GuiMenu.cpp
+index 2a2a408..624caea 100644
+--- a/es-app/src/guis/GuiMenu.cpp
++++ b/es-app/src/guis/GuiMenu.cpp
+@@ -158,6 +158,7 @@ GuiMenu::GuiMenu(Window *window, bool animate) : GuiComponent(window), mMenu(win
+ 	}, "iconKodi");	
+ #endif
+ 
++#ifndef ROCKNIX_DS_ONLY
+ 	if (ApiSystem::getInstance()->isScriptingSupported(ApiSystem::RETROACHIVEMENTS) &&
+ 		SystemConf::getInstance()->getBool("global.retroachievements") &&
+ 		Settings::getInstance()->getBool("RetroachievementsMenuitem") && 
+@@ -166,6 +167,7 @@ GuiMenu::GuiMenu(Window *window, bool animate) : GuiComponent(window), mMenu(win
+ 				if (!checkNetwork())
+ 					return;
+ 				GuiRetroAchievements::show(mWindow); }, "iconRetroachievements");
++#endif
+ 	
+ 	if (isFullUI)
+ 	{
+@@ -173,7 +175,9 @@ GuiMenu::GuiMenu(Window *window, bool animate) : GuiComponent(window), mMenu(win
+ 		addEntry(_("GAME SETTINGS").c_str(), true, [this] { openGamesSettings(); }, "iconGames");
+ 		addEntry(GuiControllersSettings::getControllersSettingsLabel(), true, [window] { GuiControllersSettings::openControllersSettings(window); }, "iconControllers");
+ 		addEntry(_("USER INTERFACE SETTINGS").c_str(), true, [this] { openUISettings(); }, "iconUI");
++#ifndef ROCKNIX_DS_ONLY
+ 		addEntry(_("GAME COLLECTION SETTINGS").c_str(), true, [this] { openCollectionSystemSettings(); }, "iconAdvanced");
++#endif
+ 		addEntry(_("SOUND SETTINGS").c_str(), true, [this] { openSoundSettings(); }, "iconSound");
+ 
+ 		if (ApiSystem::getInstance()->isScriptingSupported(ApiSystem::WIFI))
+@@ -205,12 +209,14 @@ GuiMenu::GuiMenu(Window *window, bool animate) : GuiComponent(window), mMenu(win
+ 		}
+ #endif
+ 
++#ifndef ROCKNIX_DS_ONLY
+ 		addEntry(_("SCRAPER").c_str(), true, [this] { openScraperSettings(); }, "iconScraper");		
+ 
+ 		if (ApiSystem::getInstance()->isScriptingSupported(ApiSystem::BATOCERASTORE) || ApiSystem::getInstance()->isScriptingSupported(ApiSystem::THEMESDOWNLOADER) ||
+ 			(ApiSystem::getInstance()->isScriptingSupported(ApiSystem::THEBEZELPROJECT) && ApiSystem::getInstance()->isScriptingSupported(ApiSystem::DECORATIONS)) ||
+ 			ApiSystem::getInstance()->isScriptingSupported(ApiSystem::UPGRADE))
+ 			addEntry(_("UPDATES & DOWNLOADS"), true, [this] { openUpdatesSettings(); }, "iconUpdates");
++#endif
+ 
+ 		addEntry(_("SYSTEM SETTINGS").c_str(), true, [this] { openSystemSettings(); }, "iconSystem");
+ 	}
+@@ -280,6 +286,7 @@ void GuiMenu::openResetOptions()
+ 	});
+ 
+ 	s->addGroup(_("EMULATOR MANAGEMENT"));
++#ifndef ROCKNIX_DS_ONLY
+ 	s->addEntry(_("RESET RETROARCH CONFIG TO DEFAULT"), true, [window] {
+ 	window->pushGui(new GuiMsgBox(window, _("WARNING: RETROARCH CONFIG WILL RESET TO DEFAULT\n\nPER-CORE CONFIGURATIONS WILL NOT BE AFFECTED AND NO BACKUP WILL BE CREATED!\n\nRESET RETROARCH CONFIG TO DEFAULT?"), _("YES"),
+ 		[] {
+@@ -307,6 +314,7 @@ void GuiMenu::openResetOptions()
+ 		Utils::Platform::runSystemCommand("/usr/bin/run \"/usr/bin/factoryreset mednafen\"", "", nullptr);
+ 		}, _("NO"), nullptr));
+ 	});
++#endif
+ 
+ 	s->addEntry(_("RESET STANDALONE EMULATOR CONFIGS TO DEFAULT"), true, [window] {
+ 	window->pushGui(new GuiMsgBox(window, _("WARNING: STANDALONE EMULATOR CONFIGS WILL RESET TO DEFAULT\n\nNO BACKUP WILL BE CREATED!\n\nRESET STANDALONE EMULATOR CONFIGS TO DEFAULT?"), _("YES"),
+@@ -315,12 +323,14 @@ void GuiMenu::openResetOptions()
+ 		}, _("NO"), nullptr));
+ 	});
+ 
++#ifndef ROCKNIX_DS_ONLY
+         s->addEntry(_("FULLY RESET PORTMASTER"), true, [window] {
+         window->pushGui(new GuiMsgBox(window, _("WARNING: PORTMASTER WILL RESET TO DEFAULT\n\nNO BACKUP WILL BE CREATED!\n\nRESET RESET PORTMASTER TO DEFAULT?"), _("YES"),
+                 [] {
+                 Utils::Platform::runSystemCommand("/usr/bin/run \"/usr/bin/factoryreset portmaster\"", "", nullptr);
+                 }, _("NO"), nullptr));
+         });
++#endif
+ 
+ 	s->addGroup(_("SYSTEM MANAGEMENT"));
+ 
+@@ -1196,6 +1206,7 @@ void GuiMenu::openDeveloperSettings()
+ 	s->addSaveFunc([fullExitMenu] { Settings::getInstance()->setBool("ShowOnlyExit", !fullExitMenu->getState()); });
+ #endif
+ 
++#ifndef ROCKNIX_DS_ONLY
+ 	if (ApiSystem::getInstance()->isScriptingSupported(ApiSystem::GAMESETTINGS))
+ 	{
+ 		auto retroarchRgui = std::make_shared< OptionListComponent<std::string> >(mWindow, _("RETROARCH MENU DRIVER"), false);
+@@ -1203,6 +1214,7 @@ void GuiMenu::openDeveloperSettings()
+ 		s->addWithLabel(_("RETROARCH MENU DRIVER"), retroarchRgui);
+ 		s->addSaveFunc([retroarchRgui] { SystemConf::getInstance()->set("global.retroarch.menu_driver", retroarchRgui->getSelected()); });
+ 	}
++#endif
+ #if !defined(ROCKNIX)
+ 	auto invertJoy = std::make_shared<SwitchComponent>(mWindow);
+ 	invertJoy->setState(Settings::getInstance()->getBool("InvertButtons"));
+@@ -3965,6 +3977,7 @@ void GuiMenu::openGamesSettings()
+ 	// Game List Update
+ 	s->addEntry(_("UPDATE GAMELISTS"), false, [this, window] { updateGameLists(window); });
+ 
++#ifndef ROCKNIX_DS_ONLY
+ 	s->addEntry(_("MOONLIGHT GAME STREAMING"), false, [this, window] { GuiMoonlight::show(mWindow); });
+ 
+ 	if (SystemConf::getInstance()->getBool("global.retroachievements") && !Settings::getInstance()->getBool("RetroachievementsMenuitem") && SystemConf::getInstance()->get("global.retroachievements.username") != "")
+@@ -3989,6 +4002,7 @@ void GuiMenu::openGamesSettings()
+ 	// Netplay
+ 	if (SystemData::isNetplayActivated() && ApiSystem::getInstance()->isScriptingSupported(ApiSystem::NETPLAY))
+ 		s->addEntry(_("NETPLAY SETTINGS"), true, [this] { openNetplaySettings(); }, "iconNetplay");
++#endif
+ 
+ 	// Missing Bios
+ 	if (ApiSystem::getInstance()->isScriptingSupported(ApiSystem::BIOSINFORMATION))
+@@ -4002,6 +4016,7 @@ void GuiMenu::openGamesSettings()
+ 		s->addSaveFunc([checkBiosesAtLaunch] { Settings::getInstance()->setBool("CheckBiosesAtLaunch", checkBiosesAtLaunch->getState()); });
+ 	}
+ 
++#ifndef ROCKNIX_DS_ONLY
+ 	// Custom config for systems
+ 	s->addGroup(_("SAVESTATES"));
+ 
+@@ -4027,9 +4042,11 @@ void GuiMenu::openGamesSettings()
+ 	showSaveStates->addRange({ { _("NO"), "auto" },{ _("ALWAYS") , "1" },{ _("IF NOT EMPTY") , "2" } }, SystemConf::getInstance()->get("global.savestates"));
+ 	s->addWithDescription(_("SHOW SAVESTATE MANAGER"), _("Display savestate manager before launching a game."), showSaveStates);
+ 	s->addSaveFunc([showSaveStates] { SystemConf::getInstance()->set("global.savestates", showSaveStates->getSelected()); });
++#endif
+ 
+ 	s->addGroup(_("DEFAULT GLOBAL SETTINGS"));
+ 
++#ifndef ROCKNIX_DS_ONLY
+ 	// Screen ratio choice
+ 	if (!hasGlobalFeature("ratio"))
+ 	{
+@@ -4292,6 +4309,7 @@ void GuiMenu::openGamesSettings()
+ 			mWindow->pushGui(ai_service);
+ 		});
+ 	}
++#endif
+ 	
+ 	// Load global custom features
+ 	addFeatures(CustomFeatures::GlobalFeatures, window, s, "global", "", "", "", _("DEFAULT GLOBAL SETTINGS"));
+@@ -5861,6 +5879,7 @@ void GuiMenu::openNetworkSettings(bool selectWifiEnable, bool selectAdhocEnable)
+ 		}
+ 	});
+ 
++#ifndef ROCKNIX_DS_ONLY
+ 	// CLOUD SERVICES
+ 	s->addGroup(_("CLOUD SERVICES"));
+ 
+@@ -5891,6 +5910,7 @@ void GuiMenu::openNetworkSettings(bool selectWifiEnable, bool selectAdhocEnable)
+ 		bool cloudenabled = mount_cloud->getState();
+ 		SystemConf::getInstance()->set("clouddrive.mounted", cloudenabled ? "1" : "0");
+ 	});
++#endif
+ 
+ 	s->addGroup(_("VPN SERVICES"));
+ 

@@ -14,6 +14,7 @@ PKG_BUILD_FLAGS="-gold"
 PKG_PATCH_DIRS+=" ${DEVICE}"
 
 PKG_CMAKE_OPTS_TARGET+=" -DROCKNIX=1 \
+                         -DROCKNIX_DS_ONLY=1 \
                          -DDISABLE_KODI=1 \
                          -DENABLE_FILEMANAGER=0 \
                          -DCEC=0 \
