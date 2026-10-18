@@ -278,7 +278,7 @@ Remotes: `origin` = Fork (SSH), `upstream` = ROCKNIX/distribution. `drastic-area
 | RK3566: DS-only build | `DS_ONLY=yes`, `ENABLE_32BIT=no`, `DEBUG_PACKAGES=no` in `devices/RK3566/options`; Image-Plan 693 → 427 Pakete; es_systems = nds, tools, imageviewer |
 | emulationstation | `patches/RK3566/ds-only-menu.patch` (`#ifndef ROCKNIX_DS_ONLY`): ohne Scraper, Updates (+ Update-Hinweis), RetroAchievements, Collections, Netplay, Moonlight, Cloud, RetroArch/PortMaster; `050-es_settings`: Start in NDS-Liste, Rest versteckt |
 | nds-icons | Banner-Icon + Titel aus .nds/.zip/.7z → `images/<rom>-image.png` (128 px) + gamelist.xml, beim Boot vor ES |
-| RG DS Komfort | Defaults `nds.shader=area-sharp`, `nds.threaded_3d=1`, `nds.bootlastgame=1`; Deckel (logind-Holdoff 5 s, Fake-Suspend kennt `gpio-keys-hall`); unterer Screen nach DraStic aus; Boot ins letzte Spiel über ES-„startup game“, einmal pro Boot, nur nach ≥ 15 s Spielzeit |
+| RG DS Komfort | Defaults `nds.shader=area-sharp`, `nds.threaded_3d=1`, `nds.bootlastgame=0` (Boot ins letzte Spiel abschaltbar, Default aus); Deckel (logind-Holdoff 5 s, Fake-Suspend kennt `gpio-keys-hall`); unterer Screen nach DraStic aus; Boot ins letzte Spiel über ES-„startup game“, einmal pro Boot, nur nach ≥ 15 s Spielzeit |
 
 Build: `make docker-RK3566` (braucht Docker-Desktop-WSL-Integration). Ergebnis in `release/`. Achtung: Build überschreibt `documentation/PER_DEVICE_DOCUMENTATION/RK3566/SUPPORTED_EMULATORS_AND_CORES.md` – nicht committen.
 
