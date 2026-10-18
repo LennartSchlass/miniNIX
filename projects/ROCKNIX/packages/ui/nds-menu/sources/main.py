@@ -160,7 +160,11 @@ class Menu:
         self.quit = False
         self.gamelist_mtime = 0
         self.last_check = 0.0
-        self.busy = None          # overlay text while a child runs
+        self.child = None         # Popen of the running game or EmulationStation
+        self.child_kind = ""
+        self.child_label = ""
+        self.child_seen = 0.0     # when the child's window showed up
+        self.bottom_restore = False
         self.touch_log = 0
 
     # ---------- setup ----------
@@ -205,6 +209,8 @@ class Menu:
         shot = os.environ.get("NDS_MENU_SHOT")
         if shot:
             self.select(int(os.environ.get("NDS_MENU_SEL", "0")), False)
+            if os.environ.get("NDS_MENU_PANEL"):
+                self.child, self.child_kind, self.child_label = True, os.environ["NDS_MENU_PANEL"], "Testspiel läuft …"
             self.draw()
             self.screenshot(shot)
             return 0
@@ -401,11 +407,6 @@ class Menu:
         sdl.RenderClear(self.renderer)
         self.draw_top()
         self.draw_bottom()
-        if self.busy:
-            # Only the bottom screen stays visible behind a child; the top is covered by it
-            self.rect(SCREEN_W, 0, SCREEN_W, SCREEN_H, (255, 255, 255, 170))
-            self.text(self.busy, SCREEN_W + SCREEN_W // 2, SCREEN_H // 2 - 28, 32, C_TEXT, True, "center", SCREEN_W - 40)
-            self.text("Zurück im DS-Menü, sobald das Programm beendet wird", SCREEN_W + SCREEN_W // 2, SCREEN_H // 2 + 20, 16, C_TEXT_DIM, False, "center")
         sdl.RenderPresent(self.renderer)
         self.dirty = False
 
@@ -496,6 +497,9 @@ class Menu:
         ox = SCREEN_W
         self.rect(ox, 0, SCREEN_W, SCREEN_H, C_BOTTOM_BG)
         self.stripes(ox, 8)
+        if self.child:
+            self.draw_child_panel()
+            return
         n = len(self.games)
         if n:
             self.text(f"{self.sel + 1} / {n}", ox + SCREEN_W - 16, 12, 16, C_TEXT_DIM, align="right")
@@ -532,6 +536,22 @@ class Menu:
         if selected:
             self.draw_pill(x + w // 2 - 60, y + h + 12, 120, 36, "Start", "start", True)
 
+    def draw_child_panel(self):
+        """Bottom screen while EmulationStation or a game runs on the top screen."""
+        ox = SCREEN_W
+        cx = ox + SCREEN_W // 2
+        bx, by, bw, bh = ox + 60, 70, SCREEN_W - 120, 260
+        self.rect(bx + 4, by + 6, bw, bh, C_SHADOW, 16)
+        self.box(bx, by, bw, bh, C_WHITE, C_BORDER, 2, 16)
+        if self.child_kind == "settings":
+            self.text("Einstellungen", cx, by + 28, 32, C_TEXT, True, "center")
+            self.text("EmulationStation ist auf dem oberen Bildschirm geöffnet.", cx, by + 84, 16, C_TEXT, False, "center", bw - 40)
+            self.text("Dort öffnet START das Hauptmenü.", cx, by + 110, 16, C_TEXT_DIM, False, "center", bw - 40)
+            self.draw_pill(cx - 150, by + bh - 84, 300, 56, "Zurück zum DS-Menü", "back", True)
+        else:
+            self.text(self.child_label, cx, by + 60, 32, C_TEXT, True, "center", bw - 40)
+            self.text("Das Spiel läuft auf beiden Bildschirmen.", cx, by + 120, 16, C_TEXT_DIM, False, "center", bw - 40)
+
     def draw_pill(self, x, y, w, h, label, kind, primary=False):
         self.rect(x + 2, y + 3, w, h, C_SHADOW, h // 2)
         self.box(x, y, w, h, C_SELECT if primary else C_WHITE, C_SELECT if primary else C_BORDER, 2, h // 2)
@@ -542,6 +562,8 @@ class Menu:
         elif kind == "sleep":
             self.draw_moon_icon(x + 24, y + h // 2, color)
             self.text(label, x + 52, y + h // 2 - 8, 16, color)
+        elif kind == "back":
+            self.text(label, x + w // 2, y + h // 2 - 16, 32, color, True, "center")
         else:
             self.text(label, x + w // 2, y + h // 2 - 8, 16, color, True, "center")
 
@@ -594,6 +616,8 @@ class Menu:
             self.quit = True
         elif t == sdl.EVENT_WINDOWEVENT:
             self.dirty = True
+        elif self.child and t not in (sdl.EVENT_FINGERDOWN, sdl.EVENT_FINGERUP, sdl.EVENT_FINGERMOTION):
+            return  # the pad belongs to the game or EmulationStation now
         elif t == sdl.EVENT_CONTROLLERDEVICEADDED:
             self.open_controller(ctypes.cast(ctypes.byref(ev), ctypes.POINTER(sdl.DeviceEvent)).contents.which)
         elif t == sdl.EVENT_JOYDEVICEADDED:
@@ -664,6 +688,10 @@ class Menu:
         if self.touch_log < 12:
             self.touch_log += 1
             print(f"touch {t:#x} {x:.0f},{y:.0f}", file=sys.stderr)
+        if self.child:
+            if t == sdl.EVENT_FINGERUP:
+                self.tap(x, y)
+            return
         if t == sdl.EVENT_FINGERDOWN:
             self.drag = [x, self.pos, False, [(now, x)]]
             self.animating = False
@@ -698,6 +726,11 @@ class Menu:
         ox = SCREEN_W
         if x < ox:
             return
+        if self.child:
+            cx = ox + SCREEN_W // 2
+            if self.child_kind == "settings" and cx - 150 <= x <= cx + 150 and 246 <= y <= 302:
+                self.end_child()
+            return
         if ox + 24 <= x <= ox + 224 and SCREEN_H - 72 <= y <= SCREEN_H - 24:
             self.settings()
             return
@@ -717,34 +750,65 @@ class Menu:
                 return
 
     # ---------- actions ----------
-    def run_child(self, label, cmd, extra_env=None):
+    def launch(self, kind, label, cmd, extra_env=None):
+        if self.child:
+            return
         self.held = 0
         self.drag = None
-        self.busy = label
-        self.draw()
         env = {k: v for k, v in os.environ.items() if k not in ("SDL_VIDEO_WAYLAND_WMCLASS", "SDL_APP_ID")}
         env.update(extra_env or {})
         try:
-            subprocess.run(cmd, env=env)
+            self.child = subprocess.Popen(cmd, env=env)
         except OSError as e:
             print("launch failed:", e, file=sys.stderr)
-        self.busy = None
-        ev = sdl.Event()
-        while sdl.PollEvent(ctypes.byref(ev)):
-            pass
-        self.show_both_screens()
-        self.reload_games()
+            return
+        self.child_kind, self.child_label = kind, label
+        self.child_seen = 0.0
+        self.bottom_restore = kind == "settings"
+        self.dirty = True
 
     def start_game(self):
         if not self.games or self.animating:
             return
         g = self.games[self.sel]
-        self.run_child(f"{g.name.split(' - ')[0]} läuft …",
-                       ["/usr/bin/runemu.sh", g.path, "-Pnds", "--core=drastic-sa", "--emulator=drastic"], {"NDS_MENU": "1"})
+        self.launch("game", f"{g.name.split(' - ')[0]} läuft …",
+                    ["/usr/bin/runemu.sh", g.path, "-Pnds", "--core=drastic-sa", "--emulator=drastic"], {"NDS_MENU": "1"})
 
     def settings(self):
-        self.run_child("Einstellungen sind oben geöffnet",
-                       ["bash", "-c", ". /usr/bin/es_settings; exec emulationstation --log-path /var/log --no-splash"])
+        self.launch("settings", "Einstellungen",
+                    ["bash", "-c", ". /usr/bin/es_settings; exec emulationstation --log-path /var/log --no-splash"])
+
+    def end_child(self):
+        # SDL turns SIGTERM into a normal quit, so EmulationStation saves and exits
+        if self.child and self.child.poll() is None:
+            self.child.terminate()
+            self.child_seen = -time.monotonic()
+
+    def tick_child(self):
+        if not self.child:
+            return
+        now = time.monotonic()
+        if self.child.poll() is not None:
+            self.child = None
+            ev = sdl.Event()
+            while sdl.PollEvent(ctypes.byref(ev)):
+                pass
+            self.show_both_screens()
+            self.reload_games()
+            return
+        if self.child_seen < 0 and now + self.child_seen > 8:
+            self.child.kill()
+        elif self.bottom_restore:
+            # sway's EmulationStation rules switch the bottom screen off once its window
+            # appears; put it back on for the panel a moment later
+            if not self.child_seen and window_rect("emulationstation"):
+                self.child_seen = now
+            elif self.child_seen and now - self.child_seen > 1.5:
+                self.bottom_restore = False
+                second = second_output()
+                if second:
+                    sway("output", second, "power", "on")
+                self.dirty = True
 
     def sleep(self):
         subprocess.run(["systemctl", "suspend"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
@@ -761,6 +825,7 @@ class Menu:
                 while sdl.PollEvent(ctypes.byref(ev)):
                     self.handle_event(ev)
             self.tick_repeat()
+            self.tick_child()
             if self.animating:
                 t = min(1.0, (time.monotonic() - self.anim_t0) / 0.22)
                 self.pos = self.anim_from + (self.sel - self.anim_from) * ease(t)
