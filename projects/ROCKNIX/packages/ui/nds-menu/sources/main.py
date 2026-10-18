@@ -450,7 +450,7 @@ class Menu:
         items = []
         devs = backlights()
         names = {0: "unten", 1: "oben"} if len(devs) == 2 else {}
-        for i, dev in enumerate(devs):
+        for i, dev in sorted(enumerate(devs), reverse=len(devs) == 2):   # top screen first
             label = "Helligkeit " + names.get(i, str(i + 1)) if len(devs) > 1 else "Helligkeit"
             items.append(Item("slider", label, "Helligkeit dieses Bildschirms in Prozent.",
                               get=lambda d=dev: backlight_percent(d),
@@ -817,7 +817,7 @@ class Menu:
     def draw_child_panel(self):
         """Bottom screen while EmulationStation or a game runs on the top screen. DraStic
         shrinks to the top screen while its own menu is open, so this doubles as an info
-        panel with the brightness control there."""
+        panel there (touch stays with DraStic, so nothing here is interactive)."""
         ox = SCREEN_W
         cx = ox + SCREEN_W // 2
         bx, by, bw, bh = ox + 60, 70, SCREEN_W - 120, 260
@@ -830,12 +830,11 @@ class Menu:
             self.draw_pill(cx - 150, by + bh - 84, 300, 56, "Zurück zum DS-Menü", "back", True)
             return
         self.text(self.child_label, cx, by + 22, 32, C_TEXT, True, "center", bw - 40)
-        self.text(datetime.now().strftime("%H:%M"), bx + 40, by + 80, 32, C_TEXT, True)
-        self.draw_battery(bx + bw - 40, by + 86, C_WHITE, 2)
-        devs = backlights()
-        if devs:
-            self.text("Helligkeit", bx + 40, by + 168, 16, C_TEXT_DIM)
-            self.draw_slider(bx + 160, by + 166, bw - 200, backlight_percent(devs[-1]), 5, 100, False)
+        now = datetime.now()
+        self.text(now.strftime("%H:%M"), bx + 40, by + 96, 32, C_TEXT, True)
+        self.text(f"{DAYS[now.weekday()]}, {now.day}. {MONTHS[now.month - 1]}", bx + 40, by + 136, 16, C_TEXT_DIM)
+        self.draw_battery(bx + bw - 40, by + 102, C_WHITE, 2)
+        self.text("Helligkeit und Ton: DS-Menü, Anzeige & Ton", cx, by + bh - 44, 16, C_TEXT_DIM, False, "center", bw - 40)
 
     def draw_confirm(self):
         ox = SCREEN_W
@@ -1152,13 +1151,6 @@ class Menu:
     def slider_rects(self):
         """(item, x, y, w, h[, row]) of the sliders currently on screen, for touch."""
         ox = SCREEN_W
-        if self.child and self.child_kind == "game":
-            devs = backlights()
-            if devs:
-                item = Item("slider", "", get=lambda: backlight_percent(devs[-1]),
-                            set=lambda v: run(["brightness", "set", str(len(devs)), str(v)]), lo=5, hi=100)
-                return [(item, ox + 60 + 160, 70 + 166 - 14, SCREEN_W - 120 - 200, 36)]
-            return []
         if self.pages and not self.confirm:
             page = self.pages[-1]
             out = []
