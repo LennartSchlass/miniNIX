@@ -368,8 +368,10 @@ static const char *FRAG_QUILEZ =
 // Nitro-sharp: area filter like sharp-shimmerless, but at scales >= 2 a blended pixel takes
 // the colour of a 1-texel-wide feature instead (EPX-style rule: l==a, b!=r -> b), so thin
 // lines and font strokes become a uniform 3 px instead of 2 px + a half-tone. Where the
-// rule is undecided (both sides wider than a texel, e.g. the top of a T above its stem) it
-// follows the parallel edges next to it, so strokes keep a constant width at junctions.
+// rule is undecided because both sides are wider than a texel (e.g. the top of a T above
+// its stem) it follows the parallel edges next to it, so strokes keep a constant width at
+// junctions. Alternating texels (dithering, l == b and a == r) just blend, which keeps
+// that common case cheap.
 // Flat areas, dithering and 3D rarely match exactly and keep the 50/50 blend. Colours must
 // match exactly; the tolerance only absorbs float error (blends sit on 0.5/255 steps).
 // side(): 1.0 = b takes the blended pixel, 0.0 = a, 0.5 = undecided. vote(): which colour
@@ -415,8 +417,10 @@ static const char *FRAG_NITRO_SHARP =
     "    return 0.5;\n"
     "}\n"
     "float hside(float y, float i, vec4 a, vec4 b) {\n"
-    "    float s = side(T(i - 1.5, y), a, b, T(i + 1.5, y));\n"
-    "    if (s != 0.5) return s;\n"
+    "    vec4 l = T(i - 1.5, y), r = T(i + 1.5, y);\n"
+    "    bool la = eq(l, a), br = eq(b, r);\n"
+    "    if (la != br) return la ? 1.0 : 0.0;\n"
+    "    if (!la && eq(l, b) && eq(a, r)) return 0.5;\n"
     "    return agree(\n"
     "        vote(T(i - 1.5, y - 1.0), T(i - 0.5, y - 1.0), T(i + 0.5, y - 1.0), T(i + 1.5, y - 1.0), a, b),\n"
     "        vote(T(i - 1.5, y + 1.0), T(i - 0.5, y + 1.0), T(i + 0.5, y + 1.0), T(i + 1.5, y + 1.0), a, b));\n"
@@ -446,8 +450,10 @@ static const char *FRAG_NITRO_SHARP =
     "    vec4 a = H(i.y - 0.5, i.x, w.x, rule.x), b = H(i.y + 0.5, i.x, w.x, rule.x);\n"
     "    float wy = w.y;\n"
     "    if (rule.y && !eq(a, b)) {\n"
-    "        float s = side(H(i.y - 1.5, i.x, w.x, rule.x), a, b, H(i.y + 1.5, i.x, w.x, rule.x));\n"
-    "        if (s == 0.5) {\n"
+    "        vec4 l = H(i.y - 1.5, i.x, w.x, rule.x), r = H(i.y + 1.5, i.x, w.x, rule.x);\n"
+    "        bool la = eq(l, a), br = eq(b, r);\n"
+    "        float s = la != br ? (la ? 1.0 : 0.0) : 0.5;\n"
+    "        if (la == br && (la || !eq(l, b) || !eq(a, r))) {\n"
     "            float c = w.x <= 0.0 ? i.x - 0.5 : w.x >= 1.0 ? i.x + 0.5 : i.x;\n"
     "            float d = w.x <= 0.0 || w.x >= 1.0 ? 1.0 : 0.5;\n"
     "            s = agree(vcol(c - d, i.y, a, b), vcol(c + d, i.y, a, b));\n"

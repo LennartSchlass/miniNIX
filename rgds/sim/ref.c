@@ -49,8 +49,10 @@ static void hrow(int y, px *d, int sharp) { /* w -> 2.5w, values x2 (x4 vs. orig
         px A = src(x, y), B = src(x + 1, y);
         int s = 1;
         if (sharp && !eq(A, B)) {
-            s = side(src(x - 1, y), A, B, src(x + 2, y));
-            if (s == 1)
+            px L = src(x - 1, y), R = src(x + 2, y);
+            int la = eq(L, A), br = eq(B, R);
+            s = la != br ? (la ? 2 : 0) : 1;
+            if (la == br && (la || !eq(L, B) || !eq(A, R)))
                 s = agree(vote(src(x - 1, y - 1), src(x, y - 1), src(x + 1, y - 1), src(x + 2, y - 1), A, B),
                           vote(src(x - 1, y + 1), src(x, y + 1), src(x + 1, y + 1), src(x + 2, y + 1), A, B));
         }
@@ -84,8 +86,10 @@ int main(int argc, char **argv) {
             else {
                 int s = 1;
                 if (sharp && !eq(A, B)) {
-                    s = side(E(j - 1, x), A, B, E(j + 2, x));
-                    if (s == 1) {
+                    px L = E(j - 1, x), R = E(j + 2, x);
+                    int la = eq(L, A), br = eq(B, R);
+                    s = la != br ? (la ? 2 : 0) : 1;
+                    if (la == br && (la || !eq(L, B) || !eq(A, R))) {
                         int k = x % 5, c0 = x / 5 * 2, n0, n1;
                         if (k < 2) { n0 = c0 - 1; n1 = c0 + 1; }
                         else if (k > 2) { n0 = c0; n1 = c0 + 2; }
