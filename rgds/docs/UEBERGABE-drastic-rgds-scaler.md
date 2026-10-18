@@ -294,3 +294,8 @@ Hinweis: Defaults in `system.cfg` greifen nur bei frischem `/storage` (Neu-Flash
 - [ ] Nach Beenden von DraStic ist der untere Screen aus; Touch-Tastatur in ES geht noch.
 - [ ] Boot ins letzte Spiel: beide Screens + Touch ok; nach Beenden erscheint ES; Spiel < 15 s beendet/Absturz → kein Auto-Start beim nächsten Boot; gelöschte ROM wird übersprungen. Abschalten: `nds.bootlastgame=0` in `/storage/.config/system/configs/system.cfg`.
 - [ ] WLAN, SSH, Samba funktionieren.
+
+### Gerätetest 2026-10-18 (Specific-Image, Build `cc1525d`)
+- Bootet mit dem Specific-Image (Generic bleibt schwarz: RG353-u-boot kennt das RG DS nicht).
+- Grundfunktion ok laut Nutzer.
+- Hi-Res 3D läuft nicht flüssig → bleibt aus (Default). area-sharp wirkt ohnehin nur bei 256×192 (2,5x).
