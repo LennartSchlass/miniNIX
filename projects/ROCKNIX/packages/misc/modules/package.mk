@@ -16,6 +16,8 @@ case ${DEVICE} in
     ;;
 esac
 
+[ "${DS_ONLY}" = "yes" ] && PKG_DEPENDS_TARGET="toolchain commander"
+
 makeinstall_target() {
   mkdir -p ${INSTALL}/usr/config/modules
     cp -rf ${PKG_DIR}/sources/* ${INSTALL}/usr/config/modules
@@ -25,6 +27,10 @@ post_makeinstall_target() {
   case ${DEVICE} in
     SM8650|SM8750) rm -f ${INSTALL}/usr/config/modules/*32bit* ;;
   esac
+
+  if [ "${DS_ONLY}" = "yes" ]; then
+    rm -f ${INSTALL}/usr/config/modules/*Retroarch* "${INSTALL}/usr/config/modules/Start PortMaster.sh"
+  fi
 
   if [[ "${INSTALLER_SUPPORT}" != "yes" || "${DISPLAYSERVER}" != "wl" ]]; then
     rm -f ${INSTALL}/usr/config/modules/Install*

@@ -33,6 +33,12 @@ PKG_TOOLS="patchelf i2c-tools evtest"
 
 PKG_DEBUG="debug"
 
+if [ "${DS_ONLY}" = "yes" ]; then
+  PKG_MULTIMEDIA="ffmpeg vlc"
+  PKG_SYNC=""
+  PKG_TOOLS+=" zip"
+fi
+
 if [ "${BASE_ONLY}" = "true" ]
 then
   EMULATION_DEVICE=no
@@ -42,13 +48,13 @@ else
   PKG_DEPENDS_TARGET+=" ${PKG_TOOLS} ${PKG_FONTS} ${PKG_SOUND} ${PKG_SYNC} ${PKG_GRAPHICS} ${PKG_UI} ${PKG_UI_TOOLS} ${PKG_MULTIMEDIA} misc-packages"
 
   # GL demos and tools
-  [[ ! -z "${OPENGL_SUPPORT}" ]] && PKG_DEPENDS_TARGET+=" mesa-demos"
+  [[ ! -z "${OPENGL_SUPPORT}" ]] && [ "${DS_ONLY}" != "yes" ] && PKG_DEPENDS_TARGET+=" mesa-demos"
 
   # GLmark2
-  [[ ! -z "${OPENGLES_SUPPORT}" ]] && PKG_DEPENDS_TARGET+=" glmark2"
+  [[ ! -z "${OPENGLES_SUPPORT}" ]] && [ "${DS_ONLY}" != "yes" ] && PKG_DEPENDS_TARGET+=" glmark2"
 
   # Vulkan demos and tools
-  [ "${VULKAN_SUPPORT}" = "yes" ] && PKG_DEPENDS_TARGET+=" vkmark"
+  [ "${VULKAN_SUPPORT}" = "yes" ] && [ "${DS_ONLY}" != "yes" ] && PKG_DEPENDS_TARGET+=" vkmark"
 
   # Weston kiosk shell dpms support.
   [ "${WINDOWMANAGER}" = "weston" ] && PKG_DEPENDS_TARGET+=" weston-kiosk-shell-dpms"
@@ -108,6 +114,6 @@ fi
 # Entware support
 mkdir -p ${INSTALL}
 ln -sf /storage/.opt ${INSTALL}/opt
-PKG_DEPENDS_TARGET+=" entware"
+[ "${DS_ONLY}" != "yes" ] && PKG_DEPENDS_TARGET+=" entware"
 
 true

@@ -93,13 +93,13 @@ rm -rf /storage/.config/emulationstation/locale >>/var/log/configure.log 2>&1 ||
 ln -sf /usr/share/locale /storage/.config/emulationstation/locale >>/var/log/configure.log 2>&1 ||:
 
 ### Handle assets folder for ppsspp v1.20+ upgrade
-if [ ! -d "/storage/.config/ppsspp/assets/ui_images" ]
+if [ -d "/usr/config/ppsspp" ] && [ ! -d "/storage/.config/ppsspp/assets/ui_images" ]
 then
   rsync -a --delete /usr/config/ppsspp/assets/* /storage/.config/ppsspp/assets/
 fi
 
 ### Fix Japanese language bug
-if [ ! -e "/storage/.config/ppsspp/assets/NotoSansJP-Regular.ttf" ]
+if [ -d "/usr/config/ppsspp" ] && [ ! -e "/storage/.config/ppsspp/assets/NotoSansJP-Regular.ttf" ]
 then
   cd /storage/.config/ppsspp/assets
   cp /usr/config/ppsspp/assets/NotoSansJP-Regular.ttf .

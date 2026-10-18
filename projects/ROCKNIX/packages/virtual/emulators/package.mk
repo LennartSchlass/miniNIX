@@ -99,6 +99,14 @@ case "${DEVICE}" in
     LIBRETRO_CORES+=" beetle-psx-lr beetle-saturn-lr bsnes-lr bsnes-hd-lr dolphin-lr"
 esac
 
+if [ "${DS_ONLY}" = "yes" ]; then
+  PKG_DEPENDS_TARGET=""
+  PKG_EMUS="drastic-sa"
+  EMUS_32BIT=""
+  PKG_RETROARCH="retroarch retroarch-joypads"
+  LIBRETRO_CORES=""
+fi
+
 # Split building emulators into 2 stages, needed to fit the jobs into the 6 hour GH runner time limit.
 case "${TARGET_TYPE}" in
   cores_only)
@@ -144,6 +152,20 @@ makeinstall_target() {
   ### Flush cache from previous builds
   clean_es_cache
   clean_doc_cache
+
+  if [ "${DS_ONLY}" = "yes" ]; then
+    add_system_dir /storage/roms/bios
+    add_system_dir /storage/roms/savestates
+    add_system_dir /storage/roms/themes
+    start_system_doc
+    add_emu_core nds drastic drastic-sa true
+    add_es_system nds
+    add_es_system tools
+    add_es_system imageviewer
+    install_es_systems
+    mkdir -p ${INSTALL}/usr/share/{libretro-database,retroarch-overlays}
+    return
+  fi
 
   ### Add bezels directory
   add_system_dir /storage/roms/bezels
@@ -1697,6 +1719,10 @@ makeinstall_target() {
   ### Screenshots
   add_es_system imageviewer
 
+  install_es_systems
+}
+
+install_es_systems() {
   ### Create es_systems
   mk_es_systems
 

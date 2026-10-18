@@ -20,6 +20,13 @@
 
     PARTITION_TABLE="gpt"
     HW_CPU="Rockchip RK3566"
+    ENABLE_32BIT="no"
+
+  # Nintendo DS only build with DraStic as the sole emulator (yes / no)
+    DS_ONLY="yes"
+
+  # Support for debug tools such as strace (yes / no)
+    DEBUG_PACKAGES="no"
 
   # Kernel target
     KERNEL_TARGET="Image"
