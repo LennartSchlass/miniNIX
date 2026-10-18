@@ -302,3 +302,6 @@ Hinweis: Defaults in `system.cfg` greifen nur bei frischem `/storage` (Neu-Flash
 - Icons: funktionieren mit echten ROMs (Pokémon SW2/Platin, FF IV, Mario Kart); entstehen nur beim Boot → nach ROM-Kopie neu starten.
 - Touch: per `evtest` gemessen – `fe5c0000` (event2) = oberes Panel, `fe5e0000` (event3) = unteres, beide nicht gedreht. Die ROCKNIX-Kalibrierung (`touchcontrol`) ist korrekt; ein Tausch (4eb35ff) war falsch und ist revertiert (0202985). Diagnose-Hook mit Touch-Log: siehe Sitzung, `touch_dbg()` in einer Kopie von libdrastouch.c.
 - Boot ins letzte Spiel als befremdlich empfunden → Default `nds.bootlastgame=0`.
+
+### nitro-sharp (Nachfolger von area-sharp)
+Nutzer bemerkte kleine Kerben im Text (z. B. oben im T): Am Ansatz eines Stamms ist der Querbalken senkrecht nicht mehr „1 px dünn“, die Regel blieb unentschieden → halbtransparenter Pixel. `nitro-sharp` übernimmt in genau diesem Fall die Entscheidung der parallelen Nachbarkante (Nachbarzeilen bzw. -spalten im Quellbild); nur bei Einigkeit. Simulator: GPU = CPU-Referenz (±1), ~20 % weniger Mischpixel im Testtext, Kerben an Abzweigungen weg (`docs/nitro-sharp-vs-area-sharp.png`). `area-sharp` bleibt als Alias im Hook. Name: „Nitro“ = DS-Codename (NTR).

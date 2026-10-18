@@ -71,7 +71,7 @@ static void (*p_glDisable)(GLenum) = NULL;
 #define SHADER_SCANLINES 4
 #define SHADER_LCD3X 5
 #define SHADER_LCD1X_NDS_COLOR 6
-#define SHADER_AREA_SHARP 7
+#define SHADER_NITRO_SHARP 7
 
 static int shader_mode = SHADER_NONE;
 static int gl_renderer_desktop = 0; // 1 when SDL uses "opengl" renderer (not "opengles2")
@@ -365,13 +365,17 @@ static const char *FRAG_QUILEZ =
     "    gl_FragColor = SWIZ(texture2D(u_texture, p));\n"
     "}\n";
 
-// Area-sharp: area filter like sharp-shimmerless, but at scales >= 2 a blended pixel takes
+// Nitro-sharp: area filter like sharp-shimmerless, but at scales >= 2 a blended pixel takes
 // the colour of a 1-texel-wide feature instead (EPX-style rule: l==a, b!=r -> b), so thin
-// lines and font strokes become a uniform 3 px instead of 2 px + a half-tone. Flat areas,
-// dithering and 3D rarely match exactly and keep the 50/50 blend. Colours must match
-// exactly; the tolerance only absorbs float error (blends sit on 0.5/255 steps).
-// Horizontal rule first, then vertical on the horizontally scaled rows. Needs GL_NEAREST.
-static const char *FRAG_AREA_SHARP =
+// lines and font strokes become a uniform 3 px instead of 2 px + a half-tone. Where the
+// rule is undecided (both sides wider than a texel, e.g. the top of a T above its stem) it
+// follows the parallel edges next to it, so strokes keep a constant width at junctions.
+// Flat areas, dithering and 3D rarely match exactly and keep the 50/50 blend. Colours must
+// match exactly; the tolerance only absorbs float error (blends sit on 0.5/255 steps).
+// side(): 1.0 = b takes the blended pixel, 0.0 = a, 0.5 = undecided. vote(): which colour
+// a neighbouring parallel edge gave its blended pixel. Horizontal pass first, then
+// vertical on the horizontally scaled rows. Needs GL_NEAREST.
+static const char *FRAG_NITRO_SHARP =
     "#ifdef GL_ES\n"
     "#ifdef GL_FRAGMENT_PRECISION_HIGH\n"
     "precision highp float;\n"
@@ -390,18 +394,45 @@ static const char *FRAG_AREA_SHARP =
     "    vec3 d = abs(a.rgb - b.rgb);\n"
     "    return max(d.r, max(d.g, d.b)) < 0.0015;\n"
     "}\n"
-    "float pick(vec4 l, vec4 a, vec4 b, vec4 r, float w) {\n"
+    "float side(vec4 l, vec4 a, vec4 b, vec4 r) {\n"
     "    bool la = eq(l, a), br = eq(b, r);\n"
     "    if (la && !br) return 1.0;\n"
     "    if (br && !la) return 0.0;\n"
-    "    return w;\n"
+    "    return 0.5;\n"
+    "}\n"
+    "float vote(vec4 nl, vec4 na, vec4 nb, vec4 nr, vec4 a, vec4 b) {\n"
+    "    if (eq(na, nb)) return 0.0;\n"
+    "    float s = side(nl, na, nb, nr);\n"
+    "    if (s == 0.5) return 0.0;\n"
+    "    vec4 c = s > 0.5 ? nb : na;\n"
+    "    if (eq(c, b)) return 1.0;\n"
+    "    if (eq(c, a)) return -1.0;\n"
+    "    return 0.0;\n"
+    "}\n"
+    "float agree(float v0, float v1) {\n"
+    "    if (max(v0, v1) > 0.0 && min(v0, v1) >= 0.0) return 1.0;\n"
+    "    if (min(v0, v1) < 0.0 && max(v0, v1) <= 0.0) return 0.0;\n"
+    "    return 0.5;\n"
+    "}\n"
+    "float hside(float y, float i, vec4 a, vec4 b) {\n"
+    "    float s = side(T(i - 1.5, y), a, b, T(i + 1.5, y));\n"
+    "    if (s != 0.5) return s;\n"
+    "    return agree(\n"
+    "        vote(T(i - 1.5, y - 1.0), T(i - 0.5, y - 1.0), T(i + 0.5, y - 1.0), T(i + 1.5, y - 1.0), a, b),\n"
+    "        vote(T(i - 1.5, y + 1.0), T(i - 0.5, y + 1.0), T(i + 0.5, y + 1.0), T(i + 1.5, y + 1.0), a, b));\n"
     "}\n"
     "vec4 H(float y, float i, float w, bool rule) {\n"
     "    if (w <= 0.0) return T(i - 0.5, y);\n"
     "    if (w >= 1.0) return T(i + 0.5, y);\n"
     "    vec4 a = T(i - 0.5, y), b = T(i + 0.5, y);\n"
-    "    if (rule && !eq(a, b)) w = pick(T(i - 1.5, y), a, b, T(i + 1.5, y), w);\n"
+    "    if (rule && !eq(a, b)) {\n"
+    "        float s = hside(y, i, a, b);\n"
+    "        if (s != 0.5) w = s;\n"
+    "    }\n"
     "    return mix(a, b, w);\n"
+    "}\n"
+    "float vcol(float x, float i, vec4 a, vec4 b) {\n"
+    "    return vote(T(x, i - 1.5), T(x, i - 0.5), T(x, i + 0.5), T(x, i + 1.5), a, b);\n"
     "}\n"
     "void main() {\n"
     "    vec2 scale = u_output_size / u_texture_size;\n"
@@ -414,8 +445,15 @@ static const char *FRAG_AREA_SHARP =
     "    if (w.y >= 1.0) { gl_FragColor = H(i.y + 0.5, i.x, w.x, rule.x); return; }\n"
     "    vec4 a = H(i.y - 0.5, i.x, w.x, rule.x), b = H(i.y + 0.5, i.x, w.x, rule.x);\n"
     "    float wy = w.y;\n"
-    "    if (rule.y && !eq(a, b))\n"
-    "        wy = pick(H(i.y - 1.5, i.x, w.x, rule.x), a, b, H(i.y + 1.5, i.x, w.x, rule.x), wy);\n"
+    "    if (rule.y && !eq(a, b)) {\n"
+    "        float s = side(H(i.y - 1.5, i.x, w.x, rule.x), a, b, H(i.y + 1.5, i.x, w.x, rule.x));\n"
+    "        if (s == 0.5) {\n"
+    "            float c = w.x <= 0.0 ? i.x - 0.5 : w.x >= 1.0 ? i.x + 0.5 : i.x;\n"
+    "            float d = w.x <= 0.0 || w.x >= 1.0 ? 1.0 : 0.5;\n"
+    "            s = agree(vcol(c - d, i.y, a, b), vcol(c + d, i.y, a, b));\n"
+    "        }\n"
+    "        if (s != 0.5) wy = s;\n"
+    "    }\n"
     "    gl_FragColor = mix(a, b, wy);\n"
     "}\n";
 
@@ -489,7 +527,7 @@ static void init_shader_program(void) {
         case SHADER_SCANLINES:         frag = FRAG_SCANLINES;         break;
         case SHADER_LCD3X:             frag = FRAG_LCD3X;             break;
         case SHADER_LCD1X_NDS_COLOR:   frag = FRAG_LCD1X_NDS_COLOR;   break;
-        case SHADER_AREA_SHARP:        frag = FRAG_AREA_SHARP;        shader_tex_filter = GL_NEAREST; break;
+        case SHADER_NITRO_SHARP:       frag = FRAG_NITRO_SHARP;       shader_tex_filter = GL_NEAREST; break;
         default:                       frag = FRAG_SHARP_BILINEAR;    break;
     }
     shader_program = make_gl_program(VERT_SRC, frag);
@@ -975,8 +1013,8 @@ static void init(void) {
             shader_mode = SHADER_SHARP_SHIMMERLESS;
         else if (strcmp(shader_str, "lcd1x-nds-color") == 0)
             shader_mode = SHADER_LCD1X_NDS_COLOR;
-        else if (strcmp(shader_str, "area-sharp") == 0)
-            shader_mode = SHADER_AREA_SHARP;
+        else if (strcmp(shader_str, "nitro-sharp") == 0 || strcmp(shader_str, "area-sharp") == 0)
+            shader_mode = SHADER_NITRO_SHARP;
     }
 
     const char* threshold_str = getenv("DSHOOK_MIC_THRESH");

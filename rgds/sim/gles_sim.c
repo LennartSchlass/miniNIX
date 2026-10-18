@@ -129,7 +129,7 @@ int main(int argc, char **argv) {
     else {
         for (size_t i = 0; i < sizeof FRAGS / sizeof FRAGS[0]; i++)
             if (!strcmp(FRAGS[i].name, name)) frag = *FRAGS[i].src;
-        if (!strcmp(name, "area-sharp")) filter = 0x2600; // mirrors shader_tex_filter
+        if (!strcmp(name, "nitro-sharp")) filter = 0x2600; // mirrors shader_tex_filter
     }
     if (!frag) { fprintf(stderr, "unknown shader %s\n", name); return 1; }
     // Same preambles as make_gl_program(); textures here are RGBA so SWIZ is identity
